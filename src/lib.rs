@@ -15,13 +15,16 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
 use thiserror::Error as ThisError;
-use tokio::sync::watch;
+use tokio::{
+    sync::{broadcast, watch},
+    task::JoinHandle,
+};
 use url::Url;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -53,6 +56,8 @@ pub enum Error {
     OutcomeUnknown(String),
     #[error("automation task failed: {0}")]
     AutomationTask(String),
+    #[error("event stream error: {0:?}")]
+    EventStream(EventStreamError),
     #[error("context was cancelled")]
     Cancelled,
     #[error("invalid service options: {0}")]
@@ -243,31 +248,87 @@ impl Context {
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
-        TaskHandle::placeholder("Context::spawn")
+        let mut cancelled = self.home_assistant.cancelled_receiver();
+        let handle = tokio::spawn(async move {
+            if *cancelled.borrow() {
+                return Err(Error::Cancelled);
+            }
+
+            tokio::select! {
+                result = _future => result,
+                _ = wait_cancelled(&mut cancelled) => Err(Error::Cancelled),
+            }
+        });
+        TaskHandle::from_join_handle(handle)
     }
 
-    pub async fn sleep(&self, _duration: Duration) -> Result<()> {
-        Err(Error::NotImplemented("Context::sleep"))
+    pub async fn sleep(&self, duration: Duration) -> Result<()> {
+        self.home_assistant.ensure_generation_active()?;
+        let mut cancelled = self.home_assistant.cancelled_receiver();
+        tokio::select! {
+            () = tokio::time::sleep(duration) => Ok(()),
+            () = wait_cancelled(&mut cancelled) => Err(Error::Cancelled),
+        }
     }
 
-    pub async fn timeout<F, T>(&self, _duration: Duration, _future: F) -> Result<TimeoutResult<T>>
+    pub async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<TimeoutResult<T>>
     where
         F: Future<Output = Result<T>> + Send,
         T: Send,
     {
-        Err(Error::NotImplemented("Context::timeout"))
+        self.home_assistant.ensure_generation_active()?;
+        let mut cancelled = self.home_assistant.cancelled_receiver();
+        tokio::select! {
+            result = future => result.map(TimeoutResult::Completed),
+            () = tokio::time::sleep(duration) => Ok(TimeoutResult::TimedOut),
+            () = wait_cancelled(&mut cancelled) => Err(Error::Cancelled),
+        }
     }
 
-    pub fn run_after<F, T>(&self, _duration: Duration, _future: F) -> TimerHandle<T>
+    pub fn run_after<F, T>(&self, duration: Duration, future: F) -> TimerHandle<T>
     where
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
-        TimerHandle::placeholder("Context::run_after")
+        let timer = Arc::new(TimerControl::new());
+        let timer_for_task = timer.clone();
+        let completion_for_task = timer.clone();
+        let mut timer_cancelled = timer.subscribe();
+        let mut cancelled = self.home_assistant.cancelled_receiver();
+        let handle = tokio::spawn(async move {
+            let _completion = TimerCompletionGuard(completion_for_task);
+            let result = async move {
+                if *cancelled.borrow() {
+                    return Err(Error::Cancelled);
+                }
+
+                tokio::select! {
+                    () = tokio::time::sleep(duration) => {}
+                    () = wait_cancelled(&mut timer_cancelled) => return Err(Error::Cancelled),
+                    () = wait_cancelled(&mut cancelled) => return Err(Error::Cancelled),
+                }
+
+                if timer_for_task.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+
+                tokio::select! {
+                    result = future => result,
+                    () = wait_cancelled(&mut timer_cancelled) => Err(Error::Cancelled),
+                    () = wait_cancelled(&mut cancelled) => Err(Error::Cancelled),
+                }
+            }
+            .await;
+            result
+        });
+        TimerHandle::from_join_handle(handle, timer)
     }
 
-    pub fn state_changes(&self, _entity: &EntityId) -> StateChangeStream {
-        StateChangeStream::placeholder()
+    pub fn state_changes(&self, entity: &EntityId) -> StateChangeStream {
+        StateChangeStream::new(
+            self.home_assistant.generation.state_changes.subscribe(),
+            Some(entity.clone()),
+        )
     }
 
     pub fn binary_sensor_changes(&self, sensor: &BinarySensor) -> StateChangeStream {
@@ -370,7 +431,10 @@ impl HomeAssistantClient {
 
     pub async fn subscribe_state_changes(&self) -> Result<StateChangeStream> {
         self.ensure_generation_active()?;
-        Ok(StateChangeStream::placeholder())
+        Ok(StateChangeStream::new(
+            self.generation.state_changes.subscribe(),
+            None,
+        ))
     }
 
     pub async fn subscribe_events_raw(&self, _event_type: Option<&str>) -> Result<RawEventStream> {
@@ -397,15 +461,19 @@ static NEXT_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 struct GenerationState {
     id: u64,
+    is_cancelled: AtomicBool,
     cancelled: watch::Sender<bool>,
     state_cache: Mutex<HashMap<EntityId, EntityState>>,
+    state_changes: broadcast::Sender<StateChangedEvent>,
 }
 
 impl GenerationState {
     fn new(states: impl IntoIterator<Item = EntityState>) -> Self {
         let (cancelled, _receiver) = watch::channel(false);
+        let (state_changes, _receiver) = broadcast::channel(64);
         Self {
             id: NEXT_GENERATION_ID.fetch_add(1, Ordering::Relaxed),
+            is_cancelled: AtomicBool::new(false),
             cancelled,
             state_cache: Mutex::new(
                 states
@@ -413,16 +481,18 @@ impl GenerationState {
                     .map(|state| (state.entity_id.clone(), state))
                     .collect(),
             ),
+            state_changes,
         }
     }
 
     #[cfg(test)]
     fn cancel(&self) {
+        self.is_cancelled.store(true, Ordering::Release);
         let _ = self.cancelled.send(true);
     }
 
     fn is_cancelled(&self) -> bool {
-        *self.cancelled.borrow()
+        self.is_cancelled.load(Ordering::Acquire)
     }
 
     fn cached_state(&self, entity_id: &EntityId) -> Option<EntityState> {
@@ -435,18 +505,31 @@ impl GenerationState {
 
     #[cfg(test)]
     fn cache_state(&self, state: EntityState) {
-        self.state_cache
+        let old_state = self
+            .state_cache
             .lock()
             .expect("state cache lock poisoned")
-            .insert(state.entity_id.clone(), state);
+            .insert(state.entity_id.clone(), state.clone());
+        let _ = self.state_changes.send(StateChangedEvent {
+            entity_id: state.entity_id.clone(),
+            old_state,
+            new_state: Some(state),
+        });
     }
 
     #[cfg(test)]
     fn remove_cached_state(&self, entity_id: &EntityId) -> Option<EntityState> {
-        self.state_cache
+        let old_state = self
+            .state_cache
             .lock()
             .expect("state cache lock poisoned")
-            .remove(entity_id)
+            .remove(entity_id);
+        let _ = self.state_changes.send(StateChangedEvent {
+            entity_id: entity_id.clone(),
+            old_state: old_state.clone(),
+            new_state: None,
+        });
+        old_state
     }
 }
 
@@ -786,16 +869,7 @@ impl<'a> IntoFuture for StateWait<'a> {
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            let _ = (
-                self.ctx,
-                self.entity_id,
-                self.target,
-                self.require_transition,
-                self.hold_for,
-            );
-            Err(Error::NotImplemented("StateWait"))
-        })
+        Box::pin(async move { run_state_wait(self).await.map(|_| ()) })
     }
 }
 
@@ -811,9 +885,20 @@ impl<'a> IntoFuture for TimedStateWait<'a> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let _ = (self.wait, self.timeout);
-            Err(Error::NotImplemented("TimedStateWait"))
+            match self.ctx_timeout().await? {
+                TimeoutResult::Completed(()) => Ok(WaitResult::Satisfied),
+                TimeoutResult::TimedOut => Ok(WaitResult::TimedOut),
+            }
         })
+    }
+}
+
+impl<'a> TimedStateWait<'a> {
+    async fn ctx_timeout(self) -> Result<TimeoutResult<()>> {
+        self.wait
+            .ctx
+            .timeout(self.timeout, run_state_wait(self.wait))
+            .await
     }
 }
 
@@ -846,10 +931,7 @@ impl<'a> IntoFuture for StateExpectation<'a> {
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            let _ = (self.ctx, self.entity_id, self.target, self.hold_for);
-            Err(Error::NotImplemented("StateExpectation"))
-        })
+        Box::pin(async move { run_state_expectation(self).await })
     }
 }
 
@@ -883,9 +965,13 @@ pub struct TaskHandle<T> {
 }
 
 impl<T: Send + 'static> TaskHandle<T> {
-    fn placeholder(name: &'static str) -> Self {
+    fn from_join_handle(handle: JoinHandle<Result<T>>) -> Self {
         Self {
-            inner: Box::pin(async move { Err(Error::NotImplemented(name)) }),
+            inner: Box::pin(async move {
+                handle
+                    .await
+                    .unwrap_or_else(|error| Err(Error::AutomationTask(error.to_string())))
+            }),
         }
     }
 }
@@ -900,17 +986,25 @@ impl<T> Future for TaskHandle<T> {
 
 pub struct TimerHandle<T> {
     inner: BoxFuture<Result<T>>,
+    control: Arc<TimerControl>,
 }
 
 impl<T: Send + 'static> TimerHandle<T> {
-    fn placeholder(name: &'static str) -> Self {
+    fn from_join_handle(handle: JoinHandle<Result<T>>, control: Arc<TimerControl>) -> Self {
         Self {
-            inner: Box::pin(async move { Err(Error::NotImplemented(name)) }),
+            inner: Box::pin(async move {
+                handle
+                    .await
+                    .unwrap_or_else(|error| Err(Error::AutomationTask(error.to_string())))
+            }),
+            control,
         }
     }
 
     pub async fn cancel(&mut self) -> Result<()> {
-        Err(Error::NotImplemented("TimerHandle::cancel"))
+        self.control.cancel();
+        self.control.wait_complete().await;
+        Ok(())
     }
 }
 
@@ -924,12 +1018,286 @@ impl<T> Future for TimerHandle<T> {
 
 #[derive(Debug)]
 pub struct StateChangeStream {
-    _private: (),
+    receiver: broadcast::Receiver<StateChangedEvent>,
+    entity_filter: Option<EntityId>,
+    terminal: bool,
 }
 
 impl StateChangeStream {
-    fn placeholder() -> Self {
-        Self { _private: () }
+    fn new(
+        receiver: broadcast::Receiver<StateChangedEvent>,
+        entity_filter: Option<EntityId>,
+    ) -> Self {
+        Self {
+            receiver,
+            entity_filter,
+            terminal: false,
+        }
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Option<std::result::Result<StateChangedEvent, EventStreamError>> {
+        if self.terminal {
+            return None;
+        }
+
+        loop {
+            match self.receiver.recv().await {
+                Ok(event) => {
+                    if self
+                        .entity_filter
+                        .as_ref()
+                        .is_none_or(|entity_id| event.entity_id == *entity_id)
+                    {
+                        return Some(Ok(event));
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    self.terminal = true;
+                    let dropped = usize::try_from(dropped).ok();
+                    return Some(Err(EventStreamError::Lagged { dropped }));
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    self.terminal = true;
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TimerCompletionGuard(Arc<TimerControl>);
+
+impl Drop for TimerCompletionGuard {
+    fn drop(&mut self) {
+        self.0.complete();
+    }
+}
+
+#[derive(Debug)]
+struct TimerControl {
+    is_cancelled: AtomicBool,
+    cancelled: watch::Sender<bool>,
+    complete: watch::Sender<bool>,
+}
+
+impl TimerControl {
+    fn new() -> Self {
+        let (cancelled, _receiver) = watch::channel(false);
+        let (complete, _receiver) = watch::channel(false);
+        Self {
+            is_cancelled: AtomicBool::new(false),
+            cancelled,
+            complete,
+        }
+    }
+
+    fn cancel(&self) {
+        if !self.is_cancelled.swap(true, Ordering::AcqRel) {
+            let _ = self.cancelled.send(true);
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled.load(Ordering::Acquire)
+    }
+
+    fn subscribe(&self) -> watch::Receiver<bool> {
+        self.cancelled.subscribe()
+    }
+
+    fn complete(&self) {
+        let _ = self.complete.send(true);
+    }
+
+    async fn wait_complete(&self) {
+        let mut complete = self.complete.subscribe();
+        if *complete.borrow() {
+            return;
+        }
+
+        while complete.changed().await.is_ok() {
+            if *complete.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+async fn wait_cancelled(cancelled: &mut watch::Receiver<bool>) {
+    if *cancelled.borrow() {
+        return;
+    }
+
+    while cancelled.changed().await.is_ok() {
+        if *cancelled.borrow() {
+            return;
+        }
+    }
+}
+
+async fn run_state_wait(wait: StateWait<'_>) -> Result<()> {
+    wait.ctx.home_assistant.ensure_generation_active()?;
+    let mut changes = wait.ctx.state_changes(&wait.entity_id);
+    let initial = wait
+        .ctx
+        .home_assistant
+        .generation
+        .cached_state(&wait.entity_id);
+    let mut ready_for_target = !wait.require_transition
+        || initial
+            .as_ref()
+            .and_then(|state| BinaryState::decode(&state.state).ok())
+            != Some(wait.target);
+
+    if !wait.require_transition && is_binary_state(initial.as_ref(), wait.target)? {
+        if hold_target_for(
+            wait.ctx,
+            &mut changes,
+            &wait.entity_id,
+            wait.target,
+            wait.hold_for,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        ready_for_target = true;
+    }
+
+    loop {
+        let event = next_state_change(wait.ctx, &mut changes).await?;
+        match event.new_state.as_ref() {
+            Some(new_state) => {
+                let state = BinaryState::decode(&new_state.state)?;
+                if state == wait.target {
+                    if ready_for_target
+                        && hold_target_for(
+                            wait.ctx,
+                            &mut changes,
+                            &wait.entity_id,
+                            wait.target,
+                            wait.hold_for,
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                } else {
+                    ready_for_target = true;
+                }
+            }
+            None => {
+                return Err(Error::EntityNotFound(wait.entity_id.clone()));
+            }
+        }
+    }
+}
+
+async fn run_state_expectation(
+    expectation: StateExpectation<'_>,
+) -> Result<HoldResult<BinaryState>> {
+    expectation.ctx.home_assistant.ensure_generation_active()?;
+    let mut changes = expectation.ctx.state_changes(&expectation.entity_id);
+    let current = expectation
+        .ctx
+        .home_assistant
+        .generation
+        .cached_state(&expectation.entity_id)
+        .ok_or_else(|| Error::EntityNotFound(expectation.entity_id.clone()))?;
+    let actual = BinaryState::decode(&current.state)?;
+    if actual != expectation.target {
+        return Ok(HoldResult::NotSatisfied { actual });
+    }
+
+    let Some(hold_for) = expectation.hold_for else {
+        return Ok(HoldResult::Held);
+    };
+    if hold_for.is_zero() {
+        return Ok(HoldResult::Held);
+    }
+
+    let deadline = tokio::time::sleep(hold_for);
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            () = &mut deadline => return Ok(HoldResult::Held),
+            event = next_state_change(expectation.ctx, &mut changes) => {
+                let event = event?;
+                match event.new_state.as_ref() {
+                    Some(new_state) => {
+                        let actual = BinaryState::decode(&new_state.state)?;
+                        if actual != expectation.target {
+                            return Ok(HoldResult::Interrupted { actual });
+                        }
+                    }
+                    None => return Err(Error::EntityNotFound(expectation.entity_id.clone())),
+                }
+            }
+        }
+    }
+}
+
+fn is_binary_state(state: Option<&EntityState>, target: BinaryState) -> Result<bool> {
+    state
+        .map(|state| BinaryState::decode(&state.state).map(|actual| actual == target))
+        .transpose()
+        .map(|value| value.unwrap_or(false))
+}
+
+async fn hold_target_for(
+    ctx: &Context,
+    changes: &mut StateChangeStream,
+    entity_id: &EntityId,
+    target: BinaryState,
+    hold_for: Option<Duration>,
+) -> Result<bool> {
+    let Some(hold_for) = hold_for else {
+        return Ok(true);
+    };
+    if hold_for.is_zero() {
+        return Ok(true);
+    }
+
+    let deadline = tokio::time::sleep(hold_for);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            () = &mut deadline => return Ok(true),
+            event = next_state_change(ctx, changes) => {
+                let event = event?;
+                match event.new_state.as_ref() {
+                    Some(new_state) => {
+                        let actual = BinaryState::decode(&new_state.state)?;
+                        if actual != target {
+                            return Ok(false);
+                        }
+                    }
+                    None => {
+                        return Err(Error::EntityNotFound(entity_id.clone()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn next_state_change(
+    ctx: &Context,
+    changes: &mut StateChangeStream,
+) -> Result<StateChangedEvent> {
+    tokio::select! {
+        event = changes.next() => {
+            match event {
+                Some(Ok(event)) => Ok(event),
+                Some(Err(error)) => Err(Error::EventStream(error)),
+                None => Err(Error::Connection("state change stream closed".to_string())),
+            }
+        }
+        () = ctx.cancelled() => Err(Error::Cancelled),
     }
 }
 
@@ -1215,6 +1583,333 @@ mod tests {
             assert!(matches!(
                 ha.get_state_raw(&state.entity_id).await,
                 Err(Error::Cancelled)
+            ));
+        });
+    }
+
+    #[test]
+    fn sleep_returns_cancelled_when_generation_is_cancelled() {
+        run_async(async {
+            let ctx = Context::new_generation();
+            ctx.cancel_generation();
+
+            assert!(matches!(
+                ctx.sleep(Duration::from_secs(60)).await,
+                Err(Error::Cancelled)
+            ));
+        });
+    }
+
+    #[test]
+    fn timeout_reports_completed_and_timed_out() {
+        run_async(async {
+            let ctx = Context::new_generation();
+
+            assert_eq!(
+                ctx.timeout(Duration::from_secs(1), async { Ok(5) })
+                    .await
+                    .unwrap(),
+                TimeoutResult::Completed(5)
+            );
+            assert_eq!(
+                ctx.timeout(Duration::from_millis(1), async {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok(5)
+                })
+                .await
+                .unwrap(),
+                TimeoutResult::TimedOut
+            );
+        });
+    }
+
+    #[test]
+    fn spawn_handle_awaits_task_result() {
+        run_async(async {
+            let ctx = Context::new_generation();
+            let handle = ctx.spawn(async { Ok(42) });
+
+            assert_eq!(handle.await.unwrap(), 42);
+        });
+    }
+
+    #[test]
+    fn run_after_can_complete_or_be_cancelled_without_dropping_task() {
+        run_async(async {
+            let ctx = Context::new_generation();
+            let handle = ctx.run_after(Duration::from_millis(1), async { Ok("done") });
+            assert_eq!(handle.await.unwrap(), "done");
+
+            let mut handle = ctx.run_after(Duration::from_secs(60), async { Ok("late") });
+            handle.cancel().await.unwrap();
+            handle.cancel().await.unwrap();
+            assert!(matches!(handle.await, Err(Error::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn run_after_cancel_waits_for_started_future_to_stop() {
+        run_async(async {
+            struct StopFlag(Arc<AtomicBool>);
+
+            impl Drop for StopFlag {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+
+            let ctx = Context::new_generation();
+            let stopped = Arc::new(AtomicBool::new(false));
+            let stopped_for_task = stopped.clone();
+            let (started_tx, mut started_rx) = watch::channel(false);
+            let mut handle = ctx.run_after(Duration::from_millis(1), async move {
+                let _stop = StopFlag(stopped_for_task);
+                let _ = started_tx.send(true);
+                std::future::pending::<()>().await;
+                Ok(())
+            });
+
+            while !*started_rx.borrow() {
+                started_rx.changed().await.unwrap();
+            }
+
+            handle.cancel().await.unwrap();
+            assert!(stopped.load(Ordering::Acquire));
+            assert!(matches!(handle.await, Err(Error::Cancelled)));
+        });
+    }
+
+    #[test]
+    fn state_change_stream_filters_after_cache_update() {
+        run_async(async {
+            let ctx = Context::new_generation();
+            let target = EntityId::new("binary_sensor.door").unwrap();
+            let other = sample_state("binary_sensor.window", "on");
+            let state = sample_state("binary_sensor.door", "on");
+            let mut changes = ctx.state_changes(&target);
+
+            ctx.home_assistant().cache_state(other).unwrap();
+            ctx.home_assistant().cache_state(state.clone()).unwrap();
+
+            let event = changes.next().await.unwrap().unwrap();
+            assert_eq!(event.entity_id, target);
+            assert_eq!(
+                ctx.home_assistant().get_state_raw(&target).await.unwrap(),
+                state
+            );
+        });
+    }
+
+    #[test]
+    fn binary_sensor_wait_satisfies_immediately() {
+        run_async(async {
+            let sensor = BinarySensor::new("binary_sensor.door").unwrap();
+            let ctx = Context::with_seeded_states([sample_state("binary_sensor.door", "on")]);
+
+            sensor.wait_until_on(&ctx).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn binary_sensor_wait_require_transition_leaves_and_reenters_target() {
+        run_async(async {
+            let sensor = BinarySensor::new("binary_sensor.door").unwrap();
+            let ctx = Context::with_seeded_states([sample_state("binary_sensor.door", "on")]);
+
+            assert_eq!(
+                ctx.timeout(
+                    Duration::from_millis(5),
+                    sensor
+                        .wait_until_on(&ctx)
+                        .require_transition()
+                        .into_future(),
+                )
+                .await
+                .unwrap(),
+                TimeoutResult::TimedOut
+            );
+
+            let waiter_ctx = ctx.clone();
+            let waiter_sensor = sensor.clone();
+            let waiter = ctx.spawn(async move {
+                waiter_sensor
+                    .wait_until_on(&waiter_ctx)
+                    .require_transition()
+                    .await
+            });
+            tokio::task::yield_now().await;
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "off"))
+                .unwrap();
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "on"))
+                .unwrap();
+            waiter.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn binary_sensor_wait_returns_entity_not_found_when_deleted() {
+        run_async(async {
+            let sensor = BinarySensor::new("binary_sensor.door").unwrap();
+            let ctx = Context::with_seeded_states([sample_state("binary_sensor.door", "off")]);
+            let waiter_ctx = ctx.clone();
+            let waiter_sensor = sensor.clone();
+            let waiter = ctx.spawn(async move { waiter_sensor.wait_until_on(&waiter_ctx).await });
+
+            tokio::task::yield_now().await;
+            ctx.home_assistant()
+                .remove_cached_state(sensor.entity_id())
+                .unwrap();
+
+            assert!(matches!(
+                waiter.await,
+                Err(Error::EntityNotFound(entity_id)) if entity_id == *sensor.entity_id()
+            ));
+
+            let hold_sensor = BinarySensor::new("binary_sensor.window").unwrap();
+            let hold_ctx =
+                Context::with_seeded_states([sample_state("binary_sensor.window", "off")]);
+            let hold_waiter_ctx = hold_ctx.clone();
+            let hold_waiter_sensor = hold_sensor.clone();
+            let hold_waiter = hold_ctx.spawn(async move {
+                hold_waiter_sensor
+                    .wait_until_on(&hold_waiter_ctx)
+                    .for_at_least(Duration::from_millis(50))
+                    .await
+            });
+
+            hold_ctx
+                .home_assistant()
+                .cache_state(sample_state("binary_sensor.window", "on"))
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            hold_ctx
+                .home_assistant()
+                .remove_cached_state(hold_sensor.entity_id())
+                .unwrap();
+
+            assert!(matches!(
+                hold_waiter.await,
+                Err(Error::EntityNotFound(entity_id)) if entity_id == *hold_sensor.entity_id()
+            ));
+        });
+    }
+
+    #[test]
+    fn binary_sensor_wait_for_at_least_resets_on_other_state() {
+        run_async(async {
+            let sensor = BinarySensor::new("binary_sensor.door").unwrap();
+            let ctx = Context::with_seeded_states([sample_state("binary_sensor.door", "off")]);
+            let waiter_ctx = ctx.clone();
+            let waiter_sensor = sensor.clone();
+            let mut waiter = ctx.spawn(async move {
+                waiter_sensor
+                    .wait_until_on(&waiter_ctx)
+                    .for_at_least(Duration::from_millis(20))
+                    .await
+            });
+
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "on"))
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "off"))
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            assert_eq!(
+                ctx.timeout(Duration::from_millis(1), &mut waiter)
+                    .await
+                    .unwrap(),
+                TimeoutResult::TimedOut
+            );
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "on"))
+                .unwrap();
+            waiter.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn binary_sensor_wait_within_times_out() {
+        run_async(async {
+            let sensor = BinarySensor::new("binary_sensor.door").unwrap();
+            let ctx = Context::with_seeded_states([sample_state("binary_sensor.door", "off")]);
+
+            assert_eq!(
+                sensor
+                    .wait_until_on(&ctx)
+                    .within(Duration::from_millis(1))
+                    .await
+                    .unwrap(),
+                WaitResult::TimedOut
+            );
+        });
+    }
+
+    #[test]
+    fn binary_sensor_expectation_not_satisfied_interrupted_held_and_deleted() {
+        run_async(async {
+            let sensor = BinarySensor::new("binary_sensor.door").unwrap();
+            let ctx = Context::with_seeded_states([sample_state("binary_sensor.door", "off")]);
+
+            assert_eq!(
+                sensor.expect_on(&ctx).await.unwrap(),
+                HoldResult::NotSatisfied {
+                    actual: BinaryState::Off
+                }
+            );
+
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "on"))
+                .unwrap();
+            assert_eq!(
+                sensor
+                    .expect_on(&ctx)
+                    .for_at_least(Duration::from_millis(1))
+                    .await
+                    .unwrap(),
+                HoldResult::Held
+            );
+
+            let interrupted_ctx = ctx.clone();
+            let interrupted_sensor = sensor.clone();
+            let interrupted = ctx.spawn(async move {
+                interrupted_sensor
+                    .expect_on(&interrupted_ctx)
+                    .for_at_least(Duration::from_millis(50))
+                    .await
+            });
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "off"))
+                .unwrap();
+            assert_eq!(
+                interrupted.await.unwrap(),
+                HoldResult::Interrupted {
+                    actual: BinaryState::Off
+                }
+            );
+
+            ctx.home_assistant()
+                .cache_state(sample_state("binary_sensor.door", "on"))
+                .unwrap();
+            let deleted_ctx = ctx.clone();
+            let deleted_sensor = sensor.clone();
+            let deleted = ctx.spawn(async move {
+                deleted_sensor
+                    .expect_on(&deleted_ctx)
+                    .for_at_least(Duration::from_millis(50))
+                    .await
+            });
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            ctx.home_assistant()
+                .remove_cached_state(sensor.entity_id())
+                .unwrap();
+            assert!(matches!(
+                deleted.await,
+                Err(Error::EntityNotFound(entity_id)) if entity_id == *sensor.entity_id()
             ));
         });
     }
