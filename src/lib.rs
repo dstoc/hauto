@@ -7,16 +7,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
+    collections::HashMap,
     fmt,
     future::{Future, IntoFuture},
     marker::PhantomData,
     pin::Pin,
     str::FromStr,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
 use thiserror::Error as ThisError;
+use tokio::sync::watch;
+use url::Url;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -58,6 +64,8 @@ pub enum Error {
 #[derive(Clone)]
 pub struct App {
     home_assistant_url: String,
+    websocket_url: String,
+    rest_states_url: String,
     access_token: String,
     registrations: Vec<AutomationRegistration>,
 }
@@ -74,6 +82,8 @@ impl fmt::Debug for App {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("App")
             .field("home_assistant_url", &self.home_assistant_url)
+            .field("websocket_url", &self.websocket_url)
+            .field("rest_states_url", &self.rest_states_url)
             .field("registrations", &self.automation_names())
             .finish_non_exhaustive()
     }
@@ -81,8 +91,11 @@ impl fmt::Debug for App {
 
 impl App {
     pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
+        let urls = HomeAssistantUrls::from_base_url(url.into());
         Self {
-            home_assistant_url: url.into(),
+            home_assistant_url: urls.base_url,
+            websocket_url: urls.websocket_url,
+            rest_states_url: urls.rest_states_url,
             access_token: token.into(),
             registrations: Vec::new(),
         }
@@ -120,12 +133,59 @@ impl App {
     }
 
     pub async fn run(self) -> Result<()> {
+        let _ctx = Context::new_generation();
         let registrations = self.registrations;
         for registration in &registrations {
             let _ = &registration.run;
         }
-        let _ = (self.access_token, registrations);
+        let _ = (
+            self.home_assistant_url,
+            self.websocket_url,
+            self.rest_states_url,
+            self.access_token,
+            registrations,
+        );
         Err(Error::NotImplemented("App::run"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HomeAssistantUrls {
+    base_url: String,
+    websocket_url: String,
+    rest_states_url: String,
+}
+
+impl HomeAssistantUrls {
+    fn from_base_url(base_url: String) -> Self {
+        let mut base = Url::parse(&base_url).unwrap_or_else(|error| {
+            panic!("invalid Home Assistant base URL `{base_url}`: {error}")
+        });
+        match base.scheme() {
+            "http" | "https" => {}
+            scheme => panic!("Home Assistant base URL must use http or https, got `{scheme}`"),
+        }
+        base.set_query(None);
+        base.set_fragment(None);
+
+        let mut websocket = base.clone();
+        websocket
+            .set_scheme(match base.scheme() {
+                "http" => "ws",
+                "https" => "wss",
+                _ => unreachable!("scheme checked above"),
+            })
+            .expect("ws/wss are valid URL schemes");
+        websocket.set_path("/api/websocket");
+
+        let mut states = base.clone();
+        states.set_path("/api/states");
+
+        Self {
+            base_url: base.to_string().trim_end_matches('/').to_string(),
+            websocket_url: websocket.to_string(),
+            rest_states_url: states.to_string().trim_end_matches('/').to_string(),
+        }
     }
 }
 
@@ -141,12 +201,41 @@ pub struct Context {
 }
 
 impl Context {
+    pub(crate) fn new_generation() -> Self {
+        Self {
+            home_assistant: HomeAssistantClient::new_generation(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_seeded_states(states: impl IntoIterator<Item = EntityState>) -> Self {
+        Self {
+            home_assistant: HomeAssistantClient::with_seeded_states(states),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_generation(&self) {
+        self.home_assistant.cancel_generation();
+    }
+
     pub fn home_assistant(&self) -> HomeAssistantClient {
         self.home_assistant.clone()
     }
 
     pub fn cancelled(&self) -> impl Future<Output = ()> + Send + 'static {
-        std::future::pending()
+        let mut cancelled = self.home_assistant.cancelled_receiver();
+        async move {
+            if *cancelled.borrow() {
+                return;
+            }
+
+            while cancelled.changed().await.is_ok() {
+                if *cancelled.borrow() {
+                    return;
+                }
+            }
+        }
     }
 
     pub fn spawn<F, T>(&self, _future: F) -> TaskHandle<T>
@@ -190,22 +279,63 @@ impl Context {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct HomeAssistantClient;
+#[derive(Clone, Debug)]
+pub struct HomeAssistantClient {
+    generation: Arc<GenerationState>,
+}
+
+impl Default for HomeAssistantClient {
+    fn default() -> Self {
+        Self::new_generation()
+    }
+}
 
 impl HomeAssistantClient {
+    pub(crate) fn new_generation() -> Self {
+        Self {
+            generation: Arc::new(GenerationState::new([])),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_seeded_states(states: impl IntoIterator<Item = EntityState>) -> Self {
+        Self {
+            generation: Arc::new(GenerationState::new(states)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_generation(&self) {
+        self.generation.cancel();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_state(&self, state: EntityState) -> Result<()> {
+        self.ensure_generation_active()?;
+        self.generation.cache_state(state);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_cached_state(&self, entity_id: &EntityId) -> Result<Option<EntityState>> {
+        self.ensure_generation_active()?;
+        Ok(self.generation.remove_cached_state(entity_id))
+    }
+
     pub async fn call_service_raw(
         &self,
         _domain: &str,
         _service: &str,
         _data: Value,
     ) -> Result<Value> {
+        self.ensure_generation_active()?;
         Err(Error::NotImplemented(
             "HomeAssistantClient::call_service_raw",
         ))
     }
 
     pub async fn command_raw(&self, command: Value) -> Result<Value> {
+        self.ensure_generation_active()?;
         if command.get("id").is_some() {
             return Err(Error::InvalidServiceOptions(
                 "raw commands must not include caller-supplied `id`".to_string(),
@@ -220,25 +350,103 @@ impl HomeAssistantClient {
         state: StateWrite,
     ) -> Result<SetStateResult> {
         state.validate()?;
+        self.ensure_generation_active()?;
         Err(Error::NotImplemented("HomeAssistantClient::set_state_raw"))
     }
 
     pub async fn delete_state_raw(&self, _entity_id: &EntityId) -> Result<DeleteStateResult> {
+        self.ensure_generation_active()?;
         Err(Error::NotImplemented(
             "HomeAssistantClient::delete_state_raw",
         ))
     }
 
     pub async fn get_state_raw(&self, entity_id: &EntityId) -> Result<EntityState> {
-        Err(Error::EntityNotFound(entity_id.clone()))
+        self.ensure_generation_active()?;
+        self.generation
+            .cached_state(entity_id)
+            .ok_or_else(|| Error::EntityNotFound(entity_id.clone()))
     }
 
     pub async fn subscribe_state_changes(&self) -> Result<StateChangeStream> {
+        self.ensure_generation_active()?;
         Ok(StateChangeStream::placeholder())
     }
 
     pub async fn subscribe_events_raw(&self, _event_type: Option<&str>) -> Result<RawEventStream> {
+        self.ensure_generation_active()?;
         Ok(RawEventStream::placeholder())
+    }
+
+    fn cancelled_receiver(&self) -> watch::Receiver<bool> {
+        self.generation.cancelled.subscribe()
+    }
+
+    fn ensure_generation_active(&self) -> Result<()> {
+        let _generation_id = self.generation.id;
+        if self.generation.is_cancelled() {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+static NEXT_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct GenerationState {
+    id: u64,
+    cancelled: watch::Sender<bool>,
+    state_cache: Mutex<HashMap<EntityId, EntityState>>,
+}
+
+impl GenerationState {
+    fn new(states: impl IntoIterator<Item = EntityState>) -> Self {
+        let (cancelled, _receiver) = watch::channel(false);
+        Self {
+            id: NEXT_GENERATION_ID.fetch_add(1, Ordering::Relaxed),
+            cancelled,
+            state_cache: Mutex::new(
+                states
+                    .into_iter()
+                    .map(|state| (state.entity_id.clone(), state))
+                    .collect(),
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    fn cancel(&self) {
+        let _ = self.cancelled.send(true);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        *self.cancelled.borrow()
+    }
+
+    fn cached_state(&self, entity_id: &EntityId) -> Option<EntityState> {
+        self.state_cache
+            .lock()
+            .expect("state cache lock poisoned")
+            .get(entity_id)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    fn cache_state(&self, state: EntityState) {
+        self.state_cache
+            .lock()
+            .expect("state cache lock poisoned")
+            .insert(state.entity_id.clone(), state);
+    }
+
+    #[cfg(test)]
+    fn remove_cached_state(&self, entity_id: &EntityId) -> Option<EntityState> {
+        self.state_cache
+            .lock()
+            .expect("state cache lock poisoned")
+            .remove(entity_id)
     }
 }
 
@@ -922,5 +1130,110 @@ mod tests {
             .automation_fn("noop", |_ctx| async { Ok(()) });
 
         assert_eq!(app.automation_names(), vec!["noop"]);
+    }
+
+    #[test]
+    fn app_derives_home_assistant_endpoints() {
+        let app = App::new("https://homeassistant.local:8123/", "token");
+
+        assert_eq!(app.home_assistant_url, "https://homeassistant.local:8123");
+        assert_eq!(
+            app.websocket_url,
+            "wss://homeassistant.local:8123/api/websocket"
+        );
+        assert_eq!(
+            app.rest_states_url,
+            "https://homeassistant.local:8123/api/states"
+        );
+
+        let app = App::new("http://localhost:8123?ignored=true#fragment", "token");
+        assert_eq!(app.home_assistant_url, "http://localhost:8123");
+        assert_eq!(app.websocket_url, "ws://localhost:8123/api/websocket");
+        assert_eq!(app.rest_states_url, "http://localhost:8123/api/states");
+    }
+
+    #[test]
+    fn state_cache_get_state_raw_hits_and_misses() {
+        run_async(async {
+            let state = sample_state("light.office", "on");
+            let ctx = Context::with_seeded_states([state.clone()]);
+            let ha = ctx.home_assistant();
+
+            assert_eq!(ha.get_state_raw(&state.entity_id).await.unwrap(), state);
+
+            let missing = EntityId::new("light.missing").unwrap();
+            assert!(matches!(
+                ha.get_state_raw(&missing).await,
+                Err(Error::EntityNotFound(entity_id)) if entity_id == missing
+            ));
+        });
+    }
+
+    #[test]
+    fn entity_handle_state_reads_from_cache() {
+        run_async(async {
+            let light = Light::new("light.office").unwrap();
+            let state = sample_state("light.office", "off");
+            let ctx = Context::with_seeded_states([state.clone()]);
+
+            assert_eq!(light.state(&ctx).await.unwrap(), state);
+        });
+    }
+
+    #[test]
+    fn cache_state_and_remove_cached_state_update_generation_cache() {
+        run_async(async {
+            let ctx = Context::new_generation();
+            let ha = ctx.home_assistant();
+            let state = sample_state("sensor.temperature", "21.5");
+            let entity_id = state.entity_id.clone();
+
+            ha.cache_state(state.clone()).unwrap();
+            assert_eq!(ha.get_state_raw(&entity_id).await.unwrap(), state);
+            assert!(ha.remove_cached_state(&entity_id).unwrap().is_some());
+            assert!(matches!(
+                ha.get_state_raw(&entity_id).await,
+                Err(Error::EntityNotFound(missing)) if missing == entity_id
+            ));
+        });
+    }
+
+    #[test]
+    fn cancellation_notifies_context_and_stales_client_handles() {
+        run_async(async {
+            let state = sample_state("switch.fan", "on");
+            let ctx = Context::with_seeded_states([state.clone()]);
+            let ha = ctx.home_assistant();
+            let cancelled = ctx.cancelled();
+
+            ctx.cancel_generation();
+
+            tokio::time::timeout(Duration::from_millis(50), cancelled)
+                .await
+                .expect("cancellation future should become ready");
+
+            assert!(matches!(
+                ha.get_state_raw(&state.entity_id).await,
+                Err(Error::Cancelled)
+            ));
+        });
+    }
+
+    fn run_async(future: impl Future<Output = ()>) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(future);
+    }
+
+    fn sample_state(entity_id: &str, state: &str) -> EntityState {
+        EntityState {
+            entity_id: EntityId::new(entity_id).unwrap(),
+            state: state.to_string(),
+            attributes: Map::new(),
+            last_changed: "2026-06-30T00:00:00Z".to_string(),
+            last_updated: "2026-06-30T00:00:00Z".to_string(),
+        }
     }
 }
