@@ -66,6 +66,79 @@ pub enum Error {
     NotImplemented(&'static str),
 }
 
+trait RestStateTransport: Send + Sync + 'static {
+    fn send(
+        &self,
+        request: RestStateRequest,
+    ) -> BoxFuture<Result<RestStateResponse, RestStateError>>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestStateMethod {
+    Post,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RestStateRequest {
+    method: RestStateMethod,
+    entity_id: EntityId,
+    path: String,
+    body: Option<StateWrite>,
+}
+
+impl RestStateRequest {
+    fn set(entity_id: EntityId, body: StateWrite) -> Self {
+        let path = rest_state_path(&entity_id);
+        Self {
+            method: RestStateMethod::Post,
+            entity_id,
+            path,
+            body: Some(body),
+        }
+    }
+
+    fn delete(entity_id: EntityId) -> Self {
+        let path = rest_state_path(&entity_id);
+        Self {
+            method: RestStateMethod::Delete,
+            entity_id,
+            path,
+            body: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RestStateResponse {
+    status: u16,
+    state: Option<EntityState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RestStateError {
+    message: String,
+    outcome_unknown: bool,
+}
+
+impl RestStateError {
+    #[cfg(test)]
+    fn connection(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            outcome_unknown: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn outcome_unknown(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            outcome_unknown: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct App {
     home_assistant_url: String,
@@ -297,7 +370,7 @@ impl Context {
         let mut cancelled = self.home_assistant.cancelled_receiver();
         let handle = tokio::spawn(async move {
             let _completion = TimerCompletionGuard(completion_for_task);
-            let result = async move {
+            async move {
                 if *cancelled.borrow() {
                     return Err(Error::Cancelled);
                 }
@@ -318,8 +391,7 @@ impl Context {
                     () = wait_cancelled(&mut cancelled) => Err(Error::Cancelled),
                 }
             }
-            .await;
-            result
+            .await
         });
         TimerHandle::from_join_handle(handle, timer)
     }
@@ -340,9 +412,19 @@ impl Context {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HomeAssistantClient {
     generation: Arc<GenerationState>,
+    rest_states: Option<Arc<dyn RestStateTransport>>,
+}
+
+impl fmt::Debug for HomeAssistantClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HomeAssistantClient")
+            .field("generation", &self.generation)
+            .field("has_rest_states_transport", &self.rest_states.is_some())
+            .finish()
+    }
 }
 
 impl Default for HomeAssistantClient {
@@ -355,6 +437,7 @@ impl HomeAssistantClient {
     pub(crate) fn new_generation() -> Self {
         Self {
             generation: Arc::new(GenerationState::new([])),
+            rest_states: None,
         }
     }
 
@@ -362,6 +445,15 @@ impl HomeAssistantClient {
     pub(crate) fn with_seeded_states(states: impl IntoIterator<Item = EntityState>) -> Self {
         Self {
             generation: Arc::new(GenerationState::new(states)),
+            rest_states: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_rest_states_transport(transport: impl RestStateTransport) -> Self {
+        Self {
+            generation: Arc::new(GenerationState::new([])),
+            rest_states: Some(Arc::new(transport)),
         }
     }
 
@@ -385,11 +477,12 @@ impl HomeAssistantClient {
 
     pub async fn call_service_raw(
         &self,
-        _domain: &str,
-        _service: &str,
+        domain: &str,
+        service: &str,
         _data: Value,
     ) -> Result<Value> {
         self.ensure_generation_active()?;
+        validate_domain_service(domain, service)?;
         Err(Error::NotImplemented(
             "HomeAssistantClient::call_service_raw",
         ))
@@ -397,29 +490,67 @@ impl HomeAssistantClient {
 
     pub async fn command_raw(&self, command: Value) -> Result<Value> {
         self.ensure_generation_active()?;
-        if command.get("id").is_some() {
+        let object = command.as_object().ok_or_else(|| {
+            Error::InvalidServiceOptions("raw commands must be JSON objects".to_string())
+        })?;
+        if object.contains_key("id") {
             return Err(Error::InvalidServiceOptions(
                 "raw commands must not include caller-supplied `id`".to_string(),
             ));
+        }
+        match object.get("type") {
+            Some(Value::String(value)) if !value.is_empty() => {}
+            Some(Value::String(_)) => {
+                return Err(Error::InvalidServiceOptions(
+                    "raw commands require a non-empty string `type`".to_string(),
+                ));
+            }
+            _ => {
+                return Err(Error::InvalidServiceOptions(
+                    "raw commands require a string `type`".to_string(),
+                ));
+            }
         }
         Err(Error::NotImplemented("HomeAssistantClient::command_raw"))
     }
 
     pub async fn set_state_raw(
         &self,
-        _entity_id: &EntityId,
+        entity_id: &EntityId,
         state: StateWrite,
     ) -> Result<SetStateResult> {
         state.validate()?;
         self.ensure_generation_active()?;
-        Err(Error::NotImplemented("HomeAssistantClient::set_state_raw"))
+        let Some(transport) = &self.rest_states else {
+            return Err(Error::NotImplemented("HomeAssistantClient::set_state_raw"));
+        };
+
+        match transport
+            .send(RestStateRequest::set(entity_id.clone(), state))
+            .await
+        {
+            Ok(response) => map_set_state_response(response),
+            Err(error) if error.outcome_unknown => Err(Error::OutcomeUnknown(error.message)),
+            Err(error) => Err(Error::Connection(error.message)),
+        }
     }
 
-    pub async fn delete_state_raw(&self, _entity_id: &EntityId) -> Result<DeleteStateResult> {
+    pub async fn delete_state_raw(&self, entity_id: &EntityId) -> Result<DeleteStateResult> {
         self.ensure_generation_active()?;
-        Err(Error::NotImplemented(
-            "HomeAssistantClient::delete_state_raw",
-        ))
+        let Some(transport) = &self.rest_states else {
+            return Err(Error::NotImplemented(
+                "HomeAssistantClient::delete_state_raw",
+            ));
+        };
+
+        match transport
+            .send(RestStateRequest::delete(entity_id.clone()))
+            .await
+        {
+            Ok(response) => map_delete_state_response(response),
+            Err(error) if error.outcome_unknown => Err(Error::OutcomeUnknown(error.message)),
+            Err(error) => Err(Error::Connection(error.message)),
+        }
     }
 
     pub async fn get_state_raw(&self, entity_id: &EntityId) -> Result<EntityState> {
@@ -440,6 +571,16 @@ impl HomeAssistantClient {
     pub async fn subscribe_events_raw(&self, _event_type: Option<&str>) -> Result<RawEventStream> {
         self.ensure_generation_active()?;
         Ok(RawEventStream::placeholder())
+    }
+
+    pub async fn turn_on(&self, entity_id: &EntityId) -> Result<Value> {
+        self.call_service_raw("homeassistant", "turn_on", service_entity(entity_id))
+            .await
+    }
+
+    pub async fn turn_off(&self, entity_id: &EntityId) -> Result<Value> {
+        self.call_service_raw("homeassistant", "turn_off", service_entity(entity_id))
+            .await
     }
 
     fn cancelled_receiver(&self) -> watch::Receiver<bool> {
@@ -813,7 +954,7 @@ pub enum SetStateResult {
     Updated(EntityState),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeleteStateResult {
     Deleted,
     NotFound,
@@ -1312,6 +1453,42 @@ impl RawEventStream {
     }
 }
 
+fn rest_state_path(entity_id: &EntityId) -> String {
+    format!("/api/states/{entity_id}")
+}
+
+fn map_set_state_response(response: RestStateResponse) -> Result<SetStateResult> {
+    match response.status {
+        201 => Ok(SetStateResult::Created(response.state.ok_or_else(
+            || {
+                Error::Connection(
+                    "REST state create response did not include an entity state".to_string(),
+                )
+            },
+        )?)),
+        200 => Ok(SetStateResult::Updated(response.state.ok_or_else(
+            || {
+                Error::Connection(
+                    "REST state update response did not include an entity state".to_string(),
+                )
+            },
+        )?)),
+        status => Err(Error::ServiceRejected(format!(
+            "unexpected REST set-state status {status}"
+        ))),
+    }
+}
+
+fn map_delete_state_response(response: RestStateResponse) -> Result<DeleteStateResult> {
+    match response.status {
+        200 | 204 => Ok(DeleteStateResult::Deleted),
+        404 => Ok(DeleteStateResult::NotFound),
+        status => Err(Error::ServiceRejected(format!(
+            "unexpected REST delete-state status {status}"
+        ))),
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LightTurnOn {
     pub brightness_pct: Option<u8>,
@@ -1385,6 +1562,20 @@ where
     if let Some(value) = value {
         data.insert(key.to_string(), value.into());
     }
+}
+
+fn validate_domain_service(domain: &str, service: &str) -> Result<()> {
+    if domain.trim().is_empty() {
+        return Err(Error::InvalidServiceOptions(
+            "service domain must not be empty".to_string(),
+        ));
+    }
+    if service.trim().is_empty() {
+        return Err(Error::InvalidServiceOptions(
+            "service name must not be empty".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_entity_id(value: &str) -> Result<()> {
@@ -1490,6 +1681,231 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn light_service_payloads_include_entity_transition_rgb_and_brightness() {
+        let entity_id = EntityId::new("light.office").unwrap();
+        let payload = LightTurnOn {
+            brightness_pct: Some(75),
+            brightness: Some(128),
+            transition: Some(Duration::from_millis(1500)),
+            color_temp_kelvin: Some(2700),
+            rgb_color: Some((1, 2, 3)),
+            effect: Some("pulse".to_string()),
+        }
+        .into_service_data(&entity_id);
+
+        assert_eq!(
+            payload,
+            json!({
+                "entity_id": "light.office",
+                "brightness_pct": 75,
+                "brightness": 128,
+                "transition": 1.5,
+                "color_temp_kelvin": 2700,
+                "rgb_color": [1, 2, 3],
+                "effect": "pulse",
+            })
+        );
+
+        let payload = LightTurnOff {
+            transition: Some(Duration::from_secs(2)),
+        }
+        .into_service_data(&entity_id);
+        assert_eq!(
+            payload,
+            json!({
+                "entity_id": "light.office",
+                "transition": 2.0,
+            })
+        );
+    }
+
+    #[test]
+    fn call_service_raw_validates_domain_and_service_before_placeholder() {
+        run_async(async {
+            let ha = HomeAssistantClient::new_generation();
+
+            assert!(matches!(
+                ha.call_service_raw("", "turn_on", json!({})).await,
+                Err(Error::InvalidServiceOptions(_))
+            ));
+            assert!(matches!(
+                ha.call_service_raw("light", " ", json!({})).await,
+                Err(Error::InvalidServiceOptions(_))
+            ));
+            assert!(matches!(
+                ha.call_service_raw("light", "turn_on", json!({})).await,
+                Err(Error::NotImplemented(
+                    "HomeAssistantClient::call_service_raw"
+                ))
+            ));
+        });
+    }
+
+    #[test]
+    fn command_raw_validates_shape_id_and_type_before_placeholder() {
+        run_async(async {
+            let ha = HomeAssistantClient::new_generation();
+
+            assert!(matches!(
+                ha.command_raw(json!("not an object")).await,
+                Err(Error::InvalidServiceOptions(_))
+            ));
+            assert!(matches!(
+                ha.command_raw(json!({ "id": 7, "type": "ping" })).await,
+                Err(Error::InvalidServiceOptions(_))
+            ));
+            assert!(matches!(
+                ha.command_raw(json!({ "payload": true })).await,
+                Err(Error::InvalidServiceOptions(_))
+            ));
+            assert!(matches!(
+                ha.command_raw(json!({ "type": 7 })).await,
+                Err(Error::InvalidServiceOptions(_))
+            ));
+            assert!(matches!(
+                ha.command_raw(json!({ "type": "ping" })).await,
+                Err(Error::NotImplemented("HomeAssistantClient::command_raw"))
+            ));
+        });
+    }
+
+    #[test]
+    fn set_state_raw_posts_to_rest_path_and_maps_created_updated_without_cache_write() {
+        run_async(async {
+            let state = sample_state("sensor.generated", "ready");
+            let transport = RecordingRestTransport::new([
+                Ok(RestStateResponse {
+                    status: 201,
+                    state: Some(state.clone()),
+                }),
+                Ok(RestStateResponse {
+                    status: 200,
+                    state: Some(EntityState {
+                        state: "updated".to_string(),
+                        ..state.clone()
+                    }),
+                }),
+            ]);
+            let requests = transport.requests.clone();
+            let ha = HomeAssistantClient::with_rest_states_transport(transport);
+            let entity_id = state.entity_id.clone();
+            let write = StateWrite::new("ready", json!({ "source": "hauto" })).unwrap();
+
+            assert_eq!(
+                ha.set_state_raw(&entity_id, write.clone()).await.unwrap(),
+                SetStateResult::Created(state.clone())
+            );
+            assert!(matches!(
+                ha.get_state_raw(&entity_id).await,
+                Err(Error::EntityNotFound(missing)) if missing == entity_id
+            ));
+
+            assert!(matches!(
+                ha.set_state_raw(&entity_id, write.clone()).await.unwrap(),
+                SetStateResult::Updated(returned) if returned.state == "updated"
+            ));
+
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].method, RestStateMethod::Post);
+            assert_eq!(requests[0].path, "/api/states/sensor.generated");
+            assert_eq!(requests[0].entity_id, entity_id);
+            assert_eq!(requests[0].body, Some(write));
+        });
+    }
+
+    #[test]
+    fn set_state_raw_validates_attributes_before_transport() {
+        run_async(async {
+            let transport = RecordingRestTransport::new([Ok(RestStateResponse {
+                status: 201,
+                state: Some(sample_state("sensor.generated", "ready")),
+            })]);
+            let requests = transport.requests.clone();
+            let ha = HomeAssistantClient::with_rest_states_transport(transport);
+            let entity_id = EntityId::new("sensor.generated").unwrap();
+
+            assert!(matches!(
+                ha.set_state_raw(
+                    &entity_id,
+                    StateWrite {
+                        state: "bad".to_string(),
+                        attributes: json!(["not", "object"]),
+                    },
+                )
+                .await,
+                Err(Error::InvalidServiceOptions(_))
+            ));
+            assert!(requests.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn delete_state_raw_deletes_or_reports_not_found() {
+        run_async(async {
+            let transport = RecordingRestTransport::new([
+                Ok(RestStateResponse {
+                    status: 200,
+                    state: None,
+                }),
+                Ok(RestStateResponse {
+                    status: 404,
+                    state: None,
+                }),
+            ]);
+            let requests = transport.requests.clone();
+            let ha = HomeAssistantClient::with_rest_states_transport(transport);
+            let entity_id = EntityId::new("sensor.generated").unwrap();
+
+            assert_eq!(
+                ha.delete_state_raw(&entity_id).await.unwrap(),
+                DeleteStateResult::Deleted
+            );
+            assert_eq!(
+                ha.delete_state_raw(&entity_id).await.unwrap(),
+                DeleteStateResult::NotFound
+            );
+
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].method, RestStateMethod::Delete);
+            assert_eq!(requests[0].path, "/api/states/sensor.generated");
+            assert_eq!(requests[0].body, None);
+        });
+    }
+
+    #[test]
+    fn rest_state_connection_loss_can_map_to_outcome_unknown() {
+        run_async(async {
+            let transport = RecordingRestTransport::new([
+                Err(RestStateError::outcome_unknown(
+                    "connection closed after write",
+                )),
+                Err(RestStateError::outcome_unknown(
+                    "connection closed after delete",
+                )),
+            ]);
+            let ha = HomeAssistantClient::with_rest_states_transport(transport);
+            let entity_id = EntityId::new("sensor.generated").unwrap();
+
+            assert!(matches!(
+                ha.set_state_raw(
+                    &entity_id,
+                    StateWrite::new("ready", json!({ "source": "hauto" })).unwrap(),
+                )
+                .await,
+                Err(Error::OutcomeUnknown(message))
+                    if message == "connection closed after write"
+            ));
+            assert!(matches!(
+                ha.delete_state_raw(&entity_id).await,
+                Err(Error::OutcomeUnknown(message))
+                    if message == "connection closed after delete"
+            ));
+        });
     }
 
     #[test]
@@ -1912,6 +2328,40 @@ mod tests {
                 Err(Error::EntityNotFound(entity_id)) if entity_id == *sensor.entity_id()
             ));
         });
+    }
+
+    struct RecordingRestTransport {
+        requests: Arc<Mutex<Vec<RestStateRequest>>>,
+        responses: Arc<Mutex<Vec<Result<RestStateResponse, RestStateError>>>>,
+    }
+
+    impl RecordingRestTransport {
+        fn new(
+            responses: impl IntoIterator<Item = Result<RestStateResponse, RestStateError>>,
+        ) -> Self {
+            let mut responses = responses.into_iter().collect::<Vec<_>>();
+            responses.reverse();
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                responses: Arc::new(Mutex::new(responses)),
+            }
+        }
+    }
+
+    impl RestStateTransport for RecordingRestTransport {
+        fn send(
+            &self,
+            request: RestStateRequest,
+        ) -> BoxFuture<Result<RestStateResponse, RestStateError>> {
+            self.requests.lock().unwrap().push(request);
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| Err(RestStateError::connection("no queued response")));
+            Box::pin(async move { response })
+        }
     }
 
     fn run_async(future: impl Future<Output = ()>) {
