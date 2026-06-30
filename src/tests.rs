@@ -12,7 +12,7 @@ use std::{
     net::TcpListener,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -385,6 +385,154 @@ fn app_context_generation_posts_and_deletes_states_over_rest() {
 }
 
 #[test]
+fn app_one_generation_bootstraps_snapshot_then_runs_automation_with_websocket_context() {
+    run_async(async {
+        let initial = sample_state("sensor.temperature", "21");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_server = observed.clone();
+        let (url, server) = spawn_test_ws_server(move |mut ws| async move {
+            authenticate_test_ws(&mut ws).await;
+
+            let subscribe = recv_ws_json(&mut ws).await;
+            let subscribe_id = subscribe
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap();
+            observed_for_server.lock().unwrap().push(subscribe.clone());
+            assert_eq!(subscribe.get("type"), Some(&json!("subscribe_events")));
+            assert_eq!(subscribe.get("event_type"), Some(&json!("state_changed")));
+            ws.send(ws_json(json!({
+                "id": subscribe_id,
+                "type": "result",
+                "success": true,
+                "result": null
+            })))
+            .await
+            .unwrap();
+
+            let get_states = recv_ws_json(&mut ws).await;
+            let get_states_id = get_states
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap();
+            observed_for_server.lock().unwrap().push(get_states.clone());
+            assert_eq!(get_states.get("type"), Some(&json!("get_states")));
+            ws.send(ws_json(json!({
+                "id": get_states_id,
+                "type": "result",
+                "success": true,
+                "result": [initial]
+            })))
+            .await
+            .unwrap();
+
+            let ping = recv_ws_json(&mut ws).await;
+            let ping_id = ping.get("id").and_then(serde_json::Value::as_u64).unwrap();
+            observed_for_server.lock().unwrap().push(ping.clone());
+            assert_eq!(ping.get("type"), Some(&json!("ping")));
+            ws.send(ws_json(json!({
+                "id": ping_id,
+                "type": "result",
+                "success": true,
+                "result": { "pong": true }
+            })))
+            .await
+            .unwrap();
+            ws.close(None).await.unwrap();
+        })
+        .await;
+
+        let base_url = url.replacen("ws://", "http://", 1);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_automation = runs.clone();
+        let app =
+            App::new(base_url, "secret-token").automation_fn("snapshot then ping", move |ctx| {
+                let runs = runs_for_automation.clone();
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    let state = ctx
+                        .home_assistant()
+                        .get_state_raw(&EntityId::new("sensor.temperature").unwrap())
+                        .await?;
+                    assert_eq!(state.state, "21");
+                    assert_eq!(
+                        ctx.home_assistant()
+                            .command_raw(json!({ "type": "ping" }))
+                            .await?,
+                        json!({ "pong": true })
+                    );
+                    Ok(())
+                }
+            });
+
+        assert_eq!(
+            app.run_one_generation().await.unwrap(),
+            crate::app::GenerationOutcome::ConnectionLost
+        );
+        server.await.unwrap();
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 3);
+        assert_eq!(observed[0].get("type"), Some(&json!("subscribe_events")));
+        assert_eq!(observed[1].get("type"), Some(&json!("get_states")));
+        assert_eq!(observed[2].get("type"), Some(&json!("ping")));
+    });
+}
+
+#[test]
+fn app_one_generation_surfaces_automation_failures() {
+    run_async(async {
+        let (url, server) = spawn_test_ws_server(move |mut ws| async move {
+            authenticate_test_ws(&mut ws).await;
+
+            let subscribe = recv_ws_json(&mut ws).await;
+            let subscribe_id = subscribe
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap();
+            ws.send(ws_json(json!({
+                "id": subscribe_id,
+                "type": "result",
+                "success": true,
+                "result": null
+            })))
+            .await
+            .unwrap();
+
+            let get_states = recv_ws_json(&mut ws).await;
+            let get_states_id = get_states
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap();
+            ws.send(ws_json(json!({
+                "id": get_states_id,
+                "type": "result",
+                "success": true,
+                "result": []
+            })))
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            ws.close(None).await.unwrap();
+        })
+        .await;
+
+        let base_url = url.replacen("ws://", "http://", 1);
+        let app = App::new(base_url, "secret-token").automation_fn("broken", |_ctx| async {
+            Err(Error::InvalidServiceOptions("boom".to_string()))
+        });
+
+        assert!(matches!(
+            app.run_one_generation().await,
+            Err(Error::AutomationTask(message))
+                if message.contains("broken") && message.contains("boom")
+        ));
+        server.await.unwrap();
+    });
+}
+
+#[test]
 fn reqwest_rest_transport_rejects_non_http_base_urls() {
     assert!(matches!(
         ReqwestRestStateTransport::new("ws://homeassistant.local/api", "token"),
@@ -583,6 +731,7 @@ fn websocket_get_states_and_state_changed_subscription_update_cache_and_streams(
             })))
             .await
             .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
         })
         .await;
 
@@ -639,7 +788,7 @@ fn websocket_connection_loss_fails_pending_then_rejects_new_commands_as_not_sent
         assert!(matches!(
             ha.command_raw(json!({ "type": "definitely_not_sent" }))
                 .await,
-            Err(Error::NotSent(_))
+            Err(Error::Cancelled)
         ));
         server.await.unwrap();
     });

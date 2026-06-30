@@ -23,6 +23,7 @@ impl Context {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_generation_with_rest_states(
         rest_base_url: impl AsRef<str>,
         access_token: impl Into<String>,
@@ -35,6 +36,21 @@ impl Context {
         })
     }
 
+    pub(crate) async fn new_generation_with_websocket_and_rest_states(
+        rest_base_url: impl AsRef<str>,
+        websocket_url: impl AsRef<str>,
+        access_token: impl Into<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            home_assistant: HomeAssistantClient::new_generation_with_websocket_and_rest_states(
+                rest_base_url,
+                websocket_url,
+                access_token,
+            )
+            .await?,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn with_seeded_states(states: impl IntoIterator<Item = crate::EntityState>) -> Self {
         Self {
@@ -42,7 +58,6 @@ impl Context {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn cancel_generation(&self) {
         self.home_assistant.cancel_generation();
     }

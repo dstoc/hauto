@@ -2,9 +2,9 @@
 //!
 //! This crate currently defines the public surface proposed for `hauto` and
 //! includes in-memory state caching, cancellation-aware task/timer helpers,
-//! event fan-out primitives, and REST state publishing/deletion. The full
-//! Home Assistant WebSocket runtime, raw commands, raw service calls, and raw
-//! event subscription transport remain explicit placeholders for now.
+//! event fan-out primitives, REST state publishing/deletion, and a WebSocket
+//! runtime for raw commands, service calls, state snapshots, and state-change
+//! subscriptions.
 
 use std::{future::Future, pin::Pin};
 

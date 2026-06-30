@@ -308,6 +308,7 @@ async fn read_loop(
         }
     };
     transport.closed.store(true, Ordering::Release);
+    generation.cancel();
     transport.fail_pending(failure);
 }
 

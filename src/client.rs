@@ -49,6 +49,7 @@ impl HomeAssistantClient {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_generation_with_rest_states(
         rest_base_url: impl AsRef<str>,
         access_token: impl Into<String>,
@@ -60,6 +61,25 @@ impl HomeAssistantClient {
                 access_token,
             )?)),
             ws: None,
+        })
+    }
+
+    pub(crate) async fn new_generation_with_websocket_and_rest_states(
+        rest_base_url: impl AsRef<str>,
+        websocket_url: impl AsRef<str>,
+        access_token: impl Into<String>,
+    ) -> Result<Self> {
+        let access_token = access_token.into();
+        let generation = Arc::new(GenerationState::new([]));
+        let ws =
+            WsTransport::connect(websocket_url, access_token.clone(), generation.clone()).await?;
+        Ok(Self {
+            generation,
+            rest_states: Some(Arc::new(ReqwestRestStateTransport::new(
+                rest_base_url,
+                access_token,
+            )?)),
+            ws: Some(ws),
         })
     }
 
@@ -95,7 +115,6 @@ impl HomeAssistantClient {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn cancel_generation(&self) {
         self.generation.cancel();
     }
@@ -249,7 +268,6 @@ impl HomeAssistantClient {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn refresh_states_from_websocket(&self) -> Result<Vec<EntityState>> {
         self.ensure_generation_active()?;
         let Some(transport) = &self.ws else {
@@ -267,7 +285,6 @@ impl HomeAssistantClient {
         Ok(states)
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn subscribe_state_changed_events(&self) -> Result<RawEventStream> {
         self.subscribe_events_raw(Some("state_changed")).await
     }
@@ -305,8 +322,7 @@ impl GenerationState {
         }
     }
 
-    #[cfg(test)]
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.is_cancelled.store(true, Ordering::Release);
         let _ = self.cancelled.send(true);
     }
