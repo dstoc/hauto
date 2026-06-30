@@ -263,6 +263,25 @@ trait TypedReadableEntityExt: TypedReadableEntity {
         Self::decode_state(entity_id, &raw)
     }
 
+    async fn next_change_typed(&self, ctx: &Context) -> Result<Self::State> {
+        let entity_id = self.entity_id();
+        let mut changes = ctx.state_changes(entity_id);
+
+        let event = tokio::select! {
+            event = changes.next() => {
+                event
+                    .ok_or_else(|| Error::Connection("state change stream closed".to_string()))?
+                    .map_err(Error::EventStream)?
+            }
+            () = ctx.cancelled() => return Err(Error::Cancelled),
+        };
+
+        let raw = event
+            .new_state
+            .ok_or_else(|| Error::EntityNotFound(entity_id.clone()))?;
+        Self::decode_state(entity_id, &raw)
+    }
+
     fn wait_until_matching_typed<'a, F>(
         &'a self,
         ctx: &'a Context,
@@ -345,6 +364,10 @@ macro_rules! binary_state_entity {
                 self.get_typed(ctx).await
             }
 
+            pub async fn next_change(&self, ctx: &Context) -> Result<BinaryState> {
+                self.next_change_typed(ctx).await
+            }
+
             pub fn wait_until<'a>(
                 &'a self,
                 ctx: &'a Context,
@@ -393,6 +416,10 @@ macro_rules! sensor_state_entity {
 
             pub async fn get(&self, ctx: &Context) -> Result<$state> {
                 self.get_typed(ctx).await
+            }
+
+            pub async fn next_change(&self, ctx: &Context) -> Result<$state> {
+                self.next_change_typed(ctx).await
             }
 
             pub fn wait_until_matching<'a, F>(

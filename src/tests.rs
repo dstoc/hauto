@@ -1474,6 +1474,67 @@ fn typed_entity_get_fetches_current_state_and_decodes_it() {
 }
 
 #[test]
+fn typed_entity_next_change_waits_for_change_and_decodes_new_state() {
+    run_async(async {
+        let light = Light::new("light.office").unwrap();
+        let temperature = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([
+            sample_state("light.office", "off"),
+            sample_state("sensor.temperature", "20.0"),
+        ]);
+
+        let light_ctx = ctx.clone();
+        let light_waiter = light.clone();
+        let light_change = ctx.spawn(async move { light_waiter.next_change(&light_ctx).await });
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .cache_state(sample_state("light.office", "on"))
+            .unwrap();
+        assert_eq!(light_change.await.unwrap(), BinaryState::On);
+
+        let temperature_ctx = ctx.clone();
+        let temperature_waiter = temperature.clone();
+        let temperature_change =
+            ctx.spawn(async move { temperature_waiter.next_change(&temperature_ctx).await });
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "unavailable"))
+            .unwrap();
+        assert_eq!(temperature_change.await.unwrap(), SensorValue::Unavailable);
+    });
+}
+
+#[test]
+fn typed_entity_next_change_reports_deleted_entity_and_cancellation() {
+    run_async(async {
+        let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "20.0")]);
+        let waiter_ctx = ctx.clone();
+        let waiter_sensor = sensor.clone();
+        let waiter = ctx.spawn(async move { waiter_sensor.next_change(&waiter_ctx).await });
+
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .remove_cached_state(sensor.entity_id())
+            .unwrap();
+        assert!(matches!(
+            waiter.await,
+            Err(Error::EntityNotFound(entity_id)) if entity_id == *sensor.entity_id()
+        ));
+
+        let cancelled_ctx =
+            Context::with_seeded_states([sample_state("sensor.temperature", "20.0")]);
+        let cancelled_waiter_ctx = cancelled_ctx.clone();
+        let cancelled_sensor = sensor.clone();
+        let cancelled_waiter = cancelled_ctx
+            .spawn(async move { cancelled_sensor.next_change(&cancelled_waiter_ctx).await });
+        tokio::task::yield_now().await;
+        cancelled_ctx.cancel_generation();
+        assert!(matches!(cancelled_waiter.await, Err(Error::Cancelled)));
+    });
+}
+
+#[test]
 fn sensor_value_numeric_sensor_wait_until_matching_completes_after_sentinel_state_change() {
     run_async(async {
         let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();

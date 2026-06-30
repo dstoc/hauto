@@ -72,13 +72,13 @@ impl AppliancePowerStatus {
         loop {
             let Some(power) = read_power(&ctx, &self.config.power_entity).await? else {
                 set_status(&ctx, &self.config, ApplianceStatus::Unknown).await?;
-                next_power_change(&ctx, &self.config.power_entity).await?;
+                wait_for_reclassification(&ctx, &self.config.power_entity).await?;
                 continue;
             };
 
             if power >= self.config.idle_below {
                 set_status(&ctx, &self.config, ApplianceStatus::Running).await?;
-                next_power_change(&ctx, &self.config.power_entity).await?;
+                wait_for_reclassification(&ctx, &self.config.power_entity).await?;
                 continue;
             }
 
@@ -92,7 +92,7 @@ impl AppliancePowerStatus {
                 .await?
                 {
                     set_status(&ctx, &self.config, ApplianceStatus::Idle).await?;
-                    next_power_change(&ctx, &self.config.power_entity).await?;
+                    wait_for_reclassification(&ctx, &self.config.power_entity).await?;
                 }
                 continue;
             }
@@ -106,7 +106,7 @@ impl AppliancePowerStatus {
             .await?
             {
                 set_status(&ctx, &self.config, ApplianceStatus::Off).await?;
-                next_power_change(&ctx, &self.config.power_entity).await?;
+                wait_for_reclassification(&ctx, &self.config.power_entity).await?;
             }
         }
     }
@@ -161,19 +161,13 @@ async fn power_held_below(
     ))
 }
 
-async fn next_power_change(
+async fn wait_for_reclassification(
     ctx: &Context,
     power_entity: &Sensor<SensorValue<f64>>,
 ) -> hauto::Result<()> {
-    let mut changes = ctx.state_changes(power_entity.entity_id());
-
-    tokio::select! {
-        event = changes.next() => {
-            event
-                .ok_or_else(|| HautoError::Connection("power state change stream closed".to_string()))?
-                .map_err(HautoError::EventStream)?;
-            Ok(())
-        }
-        () = ctx.cancelled() => Err(HautoError::Cancelled),
+    match power_entity.next_change(ctx).await {
+        Ok(_) => Ok(()),
+        Err(HautoError::EntityNotFound(_)) => Ok(()),
+        Err(error) => Err(error),
     }
 }

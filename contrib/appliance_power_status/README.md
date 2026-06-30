@@ -86,7 +86,7 @@ The conversion uses:
 
 - `Sensor::<SensorValue<f64>>` for the availability-aware source power entity;
 - `EntityId` + `set_state_raw` for the derived status sensor;
-- `Context::state_changes` for the event stream;
+- typed `next_change` waits for reclassifying after a published status;
 - typed sensor expectations with `.for_at_least(...)` for held thresholds.
 
 The important simplification is that there are no explicit idle/off timer
@@ -104,5 +104,3 @@ current Home Assistant state.
 - `Sensor::<SensorValue<f64>>` maps `unknown`, `unavailable`, and empty power
   states into typed availability values while keeping malformed numeric states
   as errors.
-- There is no entity-level `next_change` helper yet, so the sketch uses
-  `ctx.state_changes(power.entity_id())` directly.

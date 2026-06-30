@@ -90,6 +90,13 @@ Use `get(&ctx)` to fetch and decode the current state for a typed entity:
 let temperature = temperature.get(&ctx).await?;
 ```
 
+Use `next_change(&ctx)` to wait for the next state change for that entity and
+decode the new state:
+
+```rust
+let temperature = temperature.next_change(&ctx).await?;
+```
+
 Use `read(&StateCache)` inside global state predicates, where the current cache
 view is already available synchronously.
 
