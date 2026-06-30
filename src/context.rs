@@ -5,9 +5,15 @@ use crate::{
     TaskHandle, TimeoutResult, TimerCompletionGuard, TimerControl, TimerHandle, wait_cancelled,
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Context {
     pub(crate) home_assistant: HomeAssistantClient,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self::new_generation()
+    }
 }
 
 impl Context {
@@ -15,6 +21,18 @@ impl Context {
         Self {
             home_assistant: HomeAssistantClient::new_generation(),
         }
+    }
+
+    pub(crate) fn new_generation_with_rest_states(
+        rest_base_url: impl AsRef<str>,
+        access_token: impl Into<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            home_assistant: HomeAssistantClient::new_generation_with_rest_states(
+                rest_base_url,
+                access_token,
+            )?,
+        })
     }
 
     #[cfg(test)]

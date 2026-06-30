@@ -1,8 +1,10 @@
 //! A small Rust automation framework scaffold for Home Assistant.
 //!
-//! This crate currently defines the public surface proposed for `hauto`.
-//! Runtime, transport, cache, and event fan-out behavior are intentionally
-//! placeholder implementations for now.
+//! This crate currently defines the public surface proposed for `hauto` and
+//! includes in-memory state caching, cancellation-aware task/timer helpers,
+//! event fan-out primitives, and REST state publishing/deletion. The full
+//! Home Assistant WebSocket runtime, raw commands, raw service calls, and raw
+//! event subscription transport remain explicit placeholders for now.
 
 use std::{future::Future, pin::Pin};
 

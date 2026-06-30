@@ -13,7 +13,8 @@ use tokio::sync::{broadcast, watch};
 use crate::{
     DeleteStateResult, EntityId, EntityState, Error, RawEventStream, RestStateRequest,
     RestStateTransport, Result, SetStateResult, StateChangeStream, StateChangedEvent, StateWrite,
-    map_delete_state_response, map_set_state_response, service_entity, validate_domain_service,
+    map_delete_state_response, map_set_state_response, rest::ReqwestRestStateTransport,
+    service_entity, validate_domain_service,
 };
 
 #[derive(Clone)]
@@ -43,6 +44,19 @@ impl HomeAssistantClient {
             generation: Arc::new(GenerationState::new([])),
             rest_states: None,
         }
+    }
+
+    pub(crate) fn new_generation_with_rest_states(
+        rest_base_url: impl AsRef<str>,
+        access_token: impl Into<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            generation: Arc::new(GenerationState::new([])),
+            rest_states: Some(Arc::new(ReqwestRestStateTransport::new(
+                rest_base_url,
+                access_token,
+            )?)),
+        })
     }
 
     #[cfg(test)]

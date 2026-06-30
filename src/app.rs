@@ -75,8 +75,15 @@ impl App {
             .collect()
     }
 
+    pub(crate) fn new_context_generation(&self) -> Result<Context> {
+        Context::new_generation_with_rest_states(
+            self.home_assistant_url.as_str(),
+            self.access_token.clone(),
+        )
+    }
+
     pub async fn run(self) -> Result<()> {
-        let _ctx = Context::new_generation();
+        let _ctx = self.new_context_generation()?;
         let registrations = self.registrations;
         for registration in &registrations {
             let _ = &registration.run;

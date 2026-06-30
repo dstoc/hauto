@@ -1,14 +1,19 @@
 use crate::*;
 use crate::{
     RestStateError, RestStateMethod, RestStateRequest, RestStateResponse, RestStateTransport,
+    rest::ReqwestRestStateTransport,
 };
 use serde_json::{Map, json};
 use std::{
+    collections::HashMap,
     future::Future,
+    io::{Read, Write},
+    net::TcpListener,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    thread,
     time::Duration,
 };
 use tokio::sync::watch;
@@ -322,6 +327,67 @@ fn app_derives_home_assistant_endpoints() {
     assert_eq!(app.home_assistant_url, "http://localhost:8123");
     assert_eq!(app.websocket_url, "ws://localhost:8123/api/websocket");
     assert_eq!(app.rest_states_url, "http://localhost:8123/api/states");
+}
+
+#[test]
+fn app_context_generation_posts_and_deletes_states_over_rest() {
+    run_async(async {
+        let created = sample_state("sensor.generated", "ready");
+        let (base_url, requests, server) = TestHttpServer::spawn([
+            TestHttpResponse::json(201, json!(created)),
+            TestHttpResponse::empty(404),
+        ]);
+        let app = App::new(base_url, "secret-token");
+        let ctx = app.new_context_generation().unwrap();
+        let entity_id = EntityId::new("sensor.generated").unwrap();
+
+        assert!(matches!(
+            ctx.home_assistant()
+                .set_state_raw(
+                    &entity_id,
+                    StateWrite::new("ready", json!({ "source": "hauto" })).unwrap(),
+                )
+                .await
+                .unwrap(),
+            SetStateResult::Created(state) if state.entity_id == entity_id && state.state == "ready"
+        ));
+        assert_eq!(
+            ctx.home_assistant()
+                .delete_state_raw(&entity_id)
+                .await
+                .unwrap(),
+            DeleteStateResult::NotFound
+        );
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/api/states/sensor.generated");
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Bearer secret-token".to_string())
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&requests[0].body).unwrap(),
+            json!({ "state": "ready", "attributes": { "source": "hauto" } })
+        );
+        assert_eq!(requests[1].method, "DELETE");
+        assert_eq!(requests[1].path, "/api/states/sensor.generated");
+        assert_eq!(
+            requests[1].headers.get("authorization"),
+            Some(&"Bearer secret-token".to_string())
+        );
+        assert!(requests[1].body.is_empty());
+    });
+}
+
+#[test]
+fn reqwest_rest_transport_rejects_non_http_base_urls() {
+    assert!(matches!(
+        ReqwestRestStateTransport::new("ws://homeassistant.local/api", "token"),
+        Err(Error::Connection(_))
+    ));
 }
 
 #[test]
@@ -751,10 +817,154 @@ impl RestStateTransport for RecordingRestTransport {
 
 fn run_async(future: impl Future<Output = ()>) {
     tokio::runtime::Builder::new_current_thread()
+        .enable_io()
         .enable_time()
         .build()
         .unwrap()
         .block_on(future);
+}
+
+#[derive(Debug)]
+struct CapturedHttpRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: String,
+}
+
+struct TestHttpResponse {
+    status: u16,
+    reason: &'static str,
+    body: String,
+    content_type: Option<&'static str>,
+}
+
+impl TestHttpResponse {
+    fn json(status: u16, body: serde_json::Value) -> Self {
+        Self {
+            status,
+            reason: status_reason(status),
+            body: body.to_string(),
+            content_type: Some("application/json"),
+        }
+    }
+
+    fn empty(status: u16) -> Self {
+        Self {
+            status,
+            reason: status_reason(status),
+            body: String::new(),
+            content_type: None,
+        }
+    }
+}
+
+struct TestHttpServer;
+
+impl TestHttpServer {
+    fn spawn(
+        responses: impl IntoIterator<Item = TestHttpResponse>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<CapturedHttpRequest>>>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_thread = requests.clone();
+        let responses = responses.into_iter().collect::<Vec<_>>();
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                requests_for_thread.lock().unwrap().push(request);
+                write_http_response(&mut stream, response);
+            }
+        });
+
+        (base_url, requests, handle)
+    }
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> CapturedHttpRequest {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 1024];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        assert!(read > 0, "client closed connection before full request");
+        bytes.extend_from_slice(&buffer[..read]);
+        if let Some((header_end, content_length)) = http_header_end_and_length(&bytes) {
+            let expected_len = header_end + 4 + content_length;
+            if bytes.len() >= expected_len {
+                break;
+            }
+        }
+    }
+
+    let (header_end, content_length) = http_header_end_and_length(&bytes).unwrap();
+    let headers_text = std::str::from_utf8(&bytes[..header_end]).unwrap();
+    let mut lines = headers_text.lines();
+    let request_line = lines.next().unwrap();
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap().to_string();
+    let path = request_parts.next().unwrap().to_string();
+    let headers = lines
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
+    let body_start = header_end + 4;
+    let body = String::from_utf8(bytes[body_start..body_start + content_length].to_vec()).unwrap();
+
+    CapturedHttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    }
+}
+
+fn http_header_end_and_length(bytes: &[u8]) -> Option<(usize, usize)> {
+    let header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let headers = std::str::from_utf8(&bytes[..header_end]).ok()?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0);
+    Some((header_end, content_length))
+}
+
+fn write_http_response(stream: &mut std::net::TcpStream, response: TestHttpResponse) {
+    let content_type = response
+        .content_type
+        .map(|value| format!("content-type: {value}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\n{content_type}content-length: {}\r\nconnection: close\r\n\r\n{}",
+        response.status,
+        response.reason,
+        response.body.len(),
+        response.body
+    )
+    .unwrap();
+}
+
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        201 => "Created",
+        404 => "Not Found",
+        _ => "OK",
+    }
 }
 
 fn sample_state(entity_id: &str, state: &str) -> EntityState {
