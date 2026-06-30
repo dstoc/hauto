@@ -186,9 +186,93 @@ impl Switch {
     }
 }
 
+pub(crate) trait TypedStateEntity {
+    type State: Clone + Send + Sync + 'static;
+
+    fn entity_id(&self) -> &EntityId;
+    fn decode_state(entity_id: &EntityId, raw: &EntityState) -> Result<Self::State>;
+}
+
+fn decode_binary_state(entity_id: &EntityId, raw: &EntityState) -> Result<BinaryState> {
+    BinaryState::decode(&raw.state).map_err(|error| Error::InvalidState {
+        entity_id: entity_id.clone(),
+        reason: error.to_string(),
+    })
+}
+
+impl TypedStateEntity for BinarySensor {
+    type State = BinaryState;
+
+    fn entity_id(&self) -> &EntityId {
+        &self.entity_id
+    }
+
+    fn decode_state(entity_id: &EntityId, raw: &EntityState) -> Result<Self::State> {
+        decode_binary_state(entity_id, raw)
+    }
+}
+
+impl TypedStateEntity for Light {
+    type State = BinaryState;
+
+    fn entity_id(&self) -> &EntityId {
+        &self.entity_id
+    }
+
+    fn decode_state(entity_id: &EntityId, raw: &EntityState) -> Result<Self::State> {
+        decode_binary_state(entity_id, raw)
+    }
+}
+
+impl TypedStateEntity for Switch {
+    type State = BinaryState;
+
+    fn entity_id(&self) -> &EntityId {
+        &self.entity_id
+    }
+
+    fn decode_state(entity_id: &EntityId, raw: &EntityState) -> Result<Self::State> {
+        decode_binary_state(entity_id, raw)
+    }
+}
+
+impl TypedStateEntity for Sensor<f64> {
+    type State = f64;
+
+    fn entity_id(&self) -> &EntityId {
+        &self.entity_id
+    }
+
+    fn decode_state(entity_id: &EntityId, raw: &EntityState) -> Result<Self::State> {
+        raw.state
+            .parse::<f64>()
+            .map_err(|error| Error::InvalidState {
+                entity_id: entity_id.clone(),
+                reason: format!("expected numeric state, got `{}`: {error}", raw.state),
+            })
+    }
+}
+
+impl TypedStateEntity for Sensor<String> {
+    type State = String;
+
+    fn entity_id(&self) -> &EntityId {
+        &self.entity_id
+    }
+
+    fn decode_state(_entity_id: &EntityId, raw: &EntityState) -> Result<Self::State> {
+        Ok(raw.state.clone())
+    }
+}
+
 impl BinarySensor {
     pub fn wait_until<'a>(&'a self, ctx: &'a Context, target: BinaryState) -> StateWait<'a> {
-        StateWait::new(ctx, self.entity_id.clone(), target)
+        StateWait::new(
+            ctx,
+            <Self as TypedStateEntity>::entity_id(self).clone(),
+            Self::decode_state,
+            target,
+        )
     }
 
     pub fn wait_until_on<'a>(&'a self, ctx: &'a Context) -> StateWait<'a> {
@@ -204,7 +288,12 @@ impl BinarySensor {
         ctx: &'a Context,
         target: BinaryState,
     ) -> StateExpectation<'a> {
-        StateExpectation::new(ctx, self.entity_id.clone(), target)
+        StateExpectation::new(
+            ctx,
+            <Self as TypedStateEntity>::entity_id(self).clone(),
+            Self::decode_state,
+            target,
+        )
     }
 
     pub fn expect_on<'a>(&'a self, ctx: &'a Context) -> StateExpectation<'a> {
@@ -213,6 +302,125 @@ impl BinarySensor {
 
     pub fn expect_off<'a>(&'a self, ctx: &'a Context) -> StateExpectation<'a> {
         self.expect_state(ctx, BinaryState::Off)
+    }
+}
+
+macro_rules! binary_state_waits {
+    ($ty:ty) => {
+        impl $ty {
+            pub fn wait_until<'a>(
+                &'a self,
+                ctx: &'a Context,
+                target: BinaryState,
+            ) -> StateWait<'a> {
+                StateWait::new(
+                    ctx,
+                    <Self as TypedStateEntity>::entity_id(self).clone(),
+                    Self::decode_state,
+                    target,
+                )
+            }
+
+            pub fn wait_until_on<'a>(&'a self, ctx: &'a Context) -> StateWait<'a> {
+                self.wait_until(ctx, BinaryState::On)
+            }
+
+            pub fn wait_until_off<'a>(&'a self, ctx: &'a Context) -> StateWait<'a> {
+                self.wait_until(ctx, BinaryState::Off)
+            }
+
+            pub fn expect_state<'a>(
+                &'a self,
+                ctx: &'a Context,
+                target: BinaryState,
+            ) -> StateExpectation<'a> {
+                StateExpectation::new(
+                    ctx,
+                    <Self as TypedStateEntity>::entity_id(self).clone(),
+                    Self::decode_state,
+                    target,
+                )
+            }
+
+            pub fn expect_on<'a>(&'a self, ctx: &'a Context) -> StateExpectation<'a> {
+                self.expect_state(ctx, BinaryState::On)
+            }
+
+            pub fn expect_off<'a>(&'a self, ctx: &'a Context) -> StateExpectation<'a> {
+                self.expect_state(ctx, BinaryState::Off)
+            }
+        }
+    };
+}
+
+binary_state_waits!(Light);
+binary_state_waits!(Switch);
+
+impl Sensor<f64> {
+    pub fn wait_until_matching<'a, F>(
+        &'a self,
+        ctx: &'a Context,
+        predicate: F,
+    ) -> StateWait<'a, f64>
+    where
+        F: Fn(&f64) -> bool + Send + Sync + 'static,
+    {
+        StateWait::matching(
+            ctx,
+            <Self as TypedStateEntity>::entity_id(self).clone(),
+            Self::decode_state,
+            predicate,
+        )
+    }
+
+    pub fn expect_matching<'a, F>(
+        &'a self,
+        ctx: &'a Context,
+        predicate: F,
+    ) -> StateExpectation<'a, f64>
+    where
+        F: Fn(&f64) -> bool + Send + Sync + 'static,
+    {
+        StateExpectation::matching(
+            ctx,
+            <Self as TypedStateEntity>::entity_id(self).clone(),
+            Self::decode_state,
+            predicate,
+        )
+    }
+}
+
+impl Sensor<String> {
+    pub fn wait_until_matching<'a, F>(
+        &'a self,
+        ctx: &'a Context,
+        predicate: F,
+    ) -> StateWait<'a, String>
+    where
+        F: Fn(&String) -> bool + Send + Sync + 'static,
+    {
+        StateWait::matching(
+            ctx,
+            <Self as TypedStateEntity>::entity_id(self).clone(),
+            Self::decode_state,
+            predicate,
+        )
+    }
+
+    pub fn expect_matching<'a, F>(
+        &'a self,
+        ctx: &'a Context,
+        predicate: F,
+    ) -> StateExpectation<'a, String>
+    where
+        F: Fn(&String) -> bool + Send + Sync + 'static,
+    {
+        StateExpectation::matching(
+            ctx,
+            <Self as TypedStateEntity>::entity_id(self).clone(),
+            Self::decode_state,
+            predicate,
+        )
     }
 }
 

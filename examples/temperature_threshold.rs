@@ -1,8 +1,6 @@
 //! Turn a light on or off from a numeric temperature sensor threshold.
 //!
-//! This demonstrates the current sensor API with `Sensor::<f64>::new`. At the
-//! moment, numeric sensor decoding is intentionally simple: the example reads
-//! the Home Assistant state string and parses it as `f64`.
+//! This demonstrates typed predicate waits with `Sensor::<f64>`.
 //!
 //! Required environment variables:
 //!
@@ -20,9 +18,7 @@
 
 use std::{env, error::Error};
 
-use hauto::{
-    App, Context, EntityState, Error as HautoError, Light, LightTurnOff, LightTurnOn, Sensor,
-};
+use hauto::{App, Context, Light, LightTurnOff, LightTurnOn, Sensor};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -38,27 +34,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let light = light.clone();
 
             async move {
-                match sensor.state(&ctx).await {
-                    Ok(state) => apply_threshold(&ctx, &light, threshold, &state).await?,
-                    Err(HautoError::EntityNotFound(entity_id)) => {
-                        println!("{entity_id}: no initial state found");
-                    }
-                    Err(error) => return Err(error),
+                loop {
+                    sensor
+                        .wait_until_matching(&ctx, move |temperature| *temperature >= threshold)
+                        .await?;
+                    set_light_for_threshold(&ctx, &sensor, &light, threshold, true).await?;
+
+                    sensor
+                        .wait_until_matching(&ctx, move |temperature| *temperature < threshold)
+                        .await?;
+                    set_light_for_threshold(&ctx, &sensor, &light, threshold, false).await?;
                 }
-
-                let mut changes = ctx.state_changes(sensor.entity_id());
-
-                while let Some(event) = changes.next().await {
-                    let event = event.map_err(HautoError::EventStream)?;
-                    let Some(new_state) = event.new_state else {
-                        println!("{} was removed; waiting for it to return", event.entity_id);
-                        continue;
-                    };
-
-                    apply_threshold(&ctx, &light, threshold, &new_state).await?;
-                }
-
-                Ok(())
             }
         })
         .run()
@@ -67,34 +53,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn apply_threshold(
+async fn set_light_for_threshold(
     ctx: &Context,
+    sensor: &Sensor<f64>,
     light: &Light,
     threshold: f64,
-    state: &EntityState,
+    above_or_equal: bool,
 ) -> hauto::Result<()> {
-    let temperature = match state.state.parse::<f64>() {
-        Ok(temperature) => temperature,
-        Err(_) => {
-            println!(
-                "{}: ignoring non-numeric temperature state {:?}",
-                state.entity_id, state.state
-            );
-            return Ok(());
-        }
-    };
-
-    if temperature >= threshold {
+    if above_or_equal {
         println!(
-            "{}: {temperature} >= {threshold}; turning {} on",
-            state.entity_id,
+            "{} reached >= {threshold}; turning {} on",
+            sensor.entity_id(),
             light.entity_id()
         );
         light.turn_on(ctx, LightTurnOn::default()).await?;
     } else {
         println!(
-            "{}: {temperature} < {threshold}; turning {} off",
-            state.entity_id,
+            "{} dropped below {threshold}; turning {} off",
+            sensor.entity_id(),
             light.entity_id()
         );
         light.turn_off(ctx, LightTurnOff::default()).await?;

@@ -1,26 +1,58 @@
 use std::{
+    fmt,
     future::{Future, IntoFuture},
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
-use crate::{BinaryState, Context, EntityId, Error, Result, StateChangeStream, StateChangedEvent};
+use crate::{
+    BinaryState, Context, EntityId, EntityState, Error, Result, StateChangeStream,
+    StateChangedEvent,
+};
 
-#[derive(Clone, Debug)]
-pub struct StateWait<'a> {
+type StateDecoder<T> = fn(&EntityId, &EntityState) -> Result<T>;
+type StateCondition<T> = Arc<dyn Fn(&T) -> bool + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub struct StateWait<'a, T = BinaryState> {
     ctx: &'a Context,
     entity_id: EntityId,
-    target: BinaryState,
+    decode: StateDecoder<T>,
+    condition: StateCondition<T>,
     require_transition: bool,
     hold_for: Option<Duration>,
 }
 
-impl<'a> StateWait<'a> {
-    pub(crate) fn new(ctx: &'a Context, entity_id: EntityId, target: BinaryState) -> Self {
+impl<T> fmt::Debug for StateWait<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StateWait")
+            .field("ctx", &self.ctx)
+            .field("entity_id", &self.entity_id)
+            .field("require_transition", &self.require_transition)
+            .field("hold_for", &self.hold_for)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, T> StateWait<'a, T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    pub(crate) fn matching<F>(
+        ctx: &'a Context,
+        entity_id: EntityId,
+        decode: StateDecoder<T>,
+        predicate: F,
+    ) -> Self
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+    {
         Self {
             ctx,
             entity_id,
-            target,
+            decode,
+            condition: Arc::new(predicate),
             require_transition: false,
             hold_for: None,
         }
@@ -36,7 +68,7 @@ impl<'a> StateWait<'a> {
         self
     }
 
-    pub fn within(self, duration: Duration) -> TimedStateWait<'a> {
+    pub fn within(self, duration: Duration) -> TimedStateWait<'a, T> {
         TimedStateWait {
             wait: self,
             timeout: duration,
@@ -44,7 +76,24 @@ impl<'a> StateWait<'a> {
     }
 }
 
-impl<'a> IntoFuture for StateWait<'a> {
+impl<'a, T> StateWait<'a, T>
+where
+    T: Clone + PartialEq + Send + Sync + 'static,
+{
+    pub(crate) fn new(
+        ctx: &'a Context,
+        entity_id: EntityId,
+        decode: StateDecoder<T>,
+        target: T,
+    ) -> Self {
+        Self::matching(ctx, entity_id, decode, move |actual| actual == &target)
+    }
+}
+
+impl<'a, T> IntoFuture for StateWait<'a, T>
+where
+    T: Clone + Send + Sync + 'static,
+{
     type Output = Result<()>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
@@ -53,13 +102,25 @@ impl<'a> IntoFuture for StateWait<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct TimedStateWait<'a> {
-    wait: StateWait<'a>,
+#[derive(Clone)]
+pub struct TimedStateWait<'a, T = BinaryState> {
+    wait: StateWait<'a, T>,
     timeout: Duration,
 }
 
-impl<'a> IntoFuture for TimedStateWait<'a> {
+impl<T> fmt::Debug for TimedStateWait<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TimedStateWait")
+            .field("wait", &self.wait)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl<'a, T> IntoFuture for TimedStateWait<'a, T>
+where
+    T: Clone + Send + Sync + 'static,
+{
     type Output = Result<WaitResult>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
@@ -73,7 +134,10 @@ impl<'a> IntoFuture for TimedStateWait<'a> {
     }
 }
 
-impl<'a> TimedStateWait<'a> {
+impl<'a, T> TimedStateWait<'a, T>
+where
+    T: Clone + Send + Sync + 'static,
+{
     async fn ctx_timeout(self) -> Result<TimeoutResult<()>> {
         self.wait
             .ctx
@@ -82,20 +146,43 @@ impl<'a> TimedStateWait<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct StateExpectation<'a> {
+#[derive(Clone)]
+pub struct StateExpectation<'a, T = BinaryState> {
     ctx: &'a Context,
     entity_id: EntityId,
-    target: BinaryState,
+    decode: StateDecoder<T>,
+    condition: StateCondition<T>,
     hold_for: Option<Duration>,
 }
 
-impl<'a> StateExpectation<'a> {
-    pub(crate) fn new(ctx: &'a Context, entity_id: EntityId, target: BinaryState) -> Self {
+impl<T> fmt::Debug for StateExpectation<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StateExpectation")
+            .field("ctx", &self.ctx)
+            .field("entity_id", &self.entity_id)
+            .field("hold_for", &self.hold_for)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, T> StateExpectation<'a, T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    pub(crate) fn matching<F>(
+        ctx: &'a Context,
+        entity_id: EntityId,
+        decode: StateDecoder<T>,
+        predicate: F,
+    ) -> Self
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+    {
         Self {
             ctx,
             entity_id,
-            target,
+            decode,
+            condition: Arc::new(predicate),
             hold_for: None,
         }
     }
@@ -106,8 +193,25 @@ impl<'a> StateExpectation<'a> {
     }
 }
 
-impl<'a> IntoFuture for StateExpectation<'a> {
-    type Output = Result<HoldResult<BinaryState>>;
+impl<'a, T> StateExpectation<'a, T>
+where
+    T: Clone + PartialEq + Send + Sync + 'static,
+{
+    pub(crate) fn new(
+        ctx: &'a Context,
+        entity_id: EntityId,
+        decode: StateDecoder<T>,
+        target: T,
+    ) -> Self {
+        Self::matching(ctx, entity_id, decode, move |actual| actual == &target)
+    }
+}
+
+impl<'a, T> IntoFuture for StateExpectation<'a, T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    type Output = Result<HoldResult<T>>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -134,18 +238,25 @@ pub enum TimeoutResult<T> {
     TimedOut,
 }
 
-async fn run_state_wait(wait: StateWait<'_>) -> Result<()> {
+async fn run_state_wait<T>(wait: StateWait<'_, T>) -> Result<()>
+where
+    T: Clone + Send + Sync + 'static,
+{
     wait.ctx.home_assistant.ensure_generation_active()?;
     let mut changes = wait.ctx.state_changes(&wait.entity_id);
-    let initial = current_binary_state(wait.ctx, &wait.entity_id)?;
-    let mut ready_for_target = !wait.require_transition || initial != Some(wait.target);
+    let initial = current_state(wait.ctx, &wait.entity_id, wait.decode)?;
+    let initial_matches = initial
+        .as_ref()
+        .is_some_and(|actual| (wait.condition)(actual));
+    let mut ready_for_target = !wait.require_transition || !initial_matches;
 
-    if !wait.require_transition && initial == Some(wait.target) {
+    if !wait.require_transition && initial_matches {
         if hold_target_for(
             wait.ctx,
             &mut changes,
             &wait.entity_id,
-            wait.target,
+            wait.decode,
+            &wait.condition,
             wait.hold_for,
         )
         .await?
@@ -157,14 +268,15 @@ async fn run_state_wait(wait: StateWait<'_>) -> Result<()> {
 
     loop {
         let event = next_state_change(wait.ctx, &mut changes).await?;
-        let state = event_binary_state(&event, &wait.entity_id)?;
-        if state == wait.target {
+        let state = event_state(&event, &wait.entity_id, wait.decode)?;
+        if (wait.condition)(&state) {
             if ready_for_target
                 && hold_target_for(
                     wait.ctx,
                     &mut changes,
                     &wait.entity_id,
-                    wait.target,
+                    wait.decode,
+                    &wait.condition,
                     wait.hold_for,
                 )
                 .await?
@@ -177,14 +289,15 @@ async fn run_state_wait(wait: StateWait<'_>) -> Result<()> {
     }
 }
 
-async fn run_state_expectation(
-    expectation: StateExpectation<'_>,
-) -> Result<HoldResult<BinaryState>> {
+async fn run_state_expectation<T>(expectation: StateExpectation<'_, T>) -> Result<HoldResult<T>>
+where
+    T: Clone + Send + Sync + 'static,
+{
     expectation.ctx.home_assistant.ensure_generation_active()?;
     let mut changes = expectation.ctx.state_changes(&expectation.entity_id);
-    let actual = current_binary_state(expectation.ctx, &expectation.entity_id)?
+    let actual = current_state(expectation.ctx, &expectation.entity_id, expectation.decode)?
         .ok_or_else(|| Error::EntityNotFound(expectation.entity_id.clone()))?;
-    if actual != expectation.target {
+    if !(expectation.condition)(&actual) {
         return Ok(HoldResult::NotSatisfied { actual });
     }
 
@@ -203,8 +316,8 @@ async fn run_state_expectation(
             () = &mut deadline => return Ok(HoldResult::Held),
             event = next_state_change(expectation.ctx, &mut changes) => {
                 let event = event?;
-                let actual = event_binary_state(&event, &expectation.entity_id)?;
-                if actual != expectation.target {
+                let actual = event_state(&event, &expectation.entity_id, expectation.decode)?;
+                if !(expectation.condition)(&actual) {
                     return Ok(HoldResult::Interrupted { actual });
                 }
             }
@@ -212,30 +325,42 @@ async fn run_state_expectation(
     }
 }
 
-fn current_binary_state(ctx: &Context, entity_id: &EntityId) -> Result<Option<BinaryState>> {
+fn current_state<T>(
+    ctx: &Context,
+    entity_id: &EntityId,
+    decode: StateDecoder<T>,
+) -> Result<Option<T>> {
     ctx.home_assistant
         .generation
         .cached_state(entity_id)
         .as_ref()
-        .map(|state| BinaryState::decode(&state.state))
+        .map(|state| decode(entity_id, state))
         .transpose()
 }
 
-fn event_binary_state(event: &StateChangedEvent, entity_id: &EntityId) -> Result<BinaryState> {
+fn event_state<T>(
+    event: &StateChangedEvent,
+    entity_id: &EntityId,
+    decode: StateDecoder<T>,
+) -> Result<T> {
     event
         .new_state
         .as_ref()
         .ok_or_else(|| Error::EntityNotFound(entity_id.clone()))
-        .and_then(|state| BinaryState::decode(&state.state))
+        .and_then(|state| decode(entity_id, state))
 }
 
-pub(crate) async fn hold_target_for(
+async fn hold_target_for<T>(
     ctx: &Context,
     changes: &mut StateChangeStream,
     entity_id: &EntityId,
-    target: BinaryState,
+    decode: StateDecoder<T>,
+    condition: &StateCondition<T>,
     hold_for: Option<Duration>,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    T: Clone + Send + Sync + 'static,
+{
     let Some(hold_for) = hold_for else {
         return Ok(true);
     };
@@ -250,8 +375,8 @@ pub(crate) async fn hold_target_for(
             () = &mut deadline => return Ok(true),
             event = next_state_change(ctx, changes) => {
                 let event = event?;
-                let actual = event_binary_state(&event, entity_id)?;
-                if actual != target {
+                let actual = event_state(&event, entity_id, decode)?;
+                if !condition(&actual) {
                     return Ok(false);
                 }
             }

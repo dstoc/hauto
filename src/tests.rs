@@ -1187,6 +1187,243 @@ fn binary_sensor_expectation_not_satisfied_interrupted_held_and_deleted() {
     });
 }
 
+#[test]
+fn light_wait_until_on_completes_from_cached_on_state() {
+    run_async(async {
+        let light = Light::new("light.office").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("light.office", "on")]);
+
+        light.wait_until_on(&ctx).await.unwrap();
+    });
+}
+
+#[test]
+fn switch_wait_until_off_completes_after_matching_state_change() {
+    run_async(async {
+        let switch = Switch::new("switch.fan").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("switch.fan", "on")]);
+        let waiter_ctx = ctx.clone();
+        let waiter_switch = switch.clone();
+        let waiter = ctx.spawn(async move { waiter_switch.wait_until_off(&waiter_ctx).await });
+
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .cache_state(sample_state("switch.fan", "off"))
+            .unwrap();
+
+        waiter.await.unwrap();
+    });
+}
+
+#[test]
+fn light_expect_on_for_at_least_returns_held_when_state_stays_on() {
+    run_async(async {
+        let light = Light::new("light.office").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("light.office", "on")]);
+
+        assert_eq!(
+            light
+                .expect_on(&ctx)
+                .for_at_least(Duration::from_millis(1))
+                .await
+                .unwrap(),
+            HoldResult::Held
+        );
+    });
+}
+
+#[test]
+fn switch_expect_off_returns_not_satisfied_when_currently_on() {
+    run_async(async {
+        let switch = Switch::new("switch.fan").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("switch.fan", "on")]);
+
+        assert_eq!(
+            switch.expect_off(&ctx).await.unwrap(),
+            HoldResult::NotSatisfied {
+                actual: BinaryState::On
+            }
+        );
+    });
+}
+
+#[test]
+fn numeric_sensor_wait_until_matching_completes_after_state_change() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "29.5")]);
+        let waiter_ctx = ctx.clone();
+        let waiter_sensor = sensor.clone();
+        let waiter = ctx.spawn(async move {
+            waiter_sensor
+                .wait_until_matching(&waiter_ctx, |value| *value > 30.0)
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "30.5"))
+            .unwrap();
+
+        waiter.await.unwrap();
+    });
+}
+
+#[test]
+fn numeric_sensor_expect_matching_returns_held_from_cached_match() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "31.25")]);
+
+        assert_eq!(
+            sensor
+                .expect_matching(&ctx, |value| *value > 30.0)
+                .await
+                .unwrap(),
+            HoldResult::Held
+        );
+    });
+}
+
+#[test]
+fn numeric_sensor_expect_matching_for_at_least_returns_interrupted_on_later_miss() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "31.0")]);
+        let expectation_ctx = ctx.clone();
+        let expectation_sensor = sensor.clone();
+        let expectation = ctx.spawn(async move {
+            expectation_sensor
+                .expect_matching(&expectation_ctx, |value| *value > 30.0)
+                .for_at_least(Duration::from_millis(50))
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "29.0"))
+            .unwrap();
+
+        assert_eq!(
+            expectation.await.unwrap(),
+            HoldResult::Interrupted { actual: 29.0 }
+        );
+    });
+}
+
+#[test]
+fn numeric_sensor_predicate_require_transition_requires_true_false_true() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "31.0")]);
+
+        assert_eq!(
+            sensor
+                .wait_until_matching(&ctx, |value| *value > 30.0)
+                .require_transition()
+                .within(Duration::from_millis(1))
+                .await
+                .unwrap(),
+            WaitResult::TimedOut
+        );
+
+        let waiter_ctx = ctx.clone();
+        let waiter_sensor = sensor.clone();
+        let waiter = ctx.spawn(async move {
+            waiter_sensor
+                .wait_until_matching(&waiter_ctx, |value| *value > 30.0)
+                .require_transition()
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "29.0"))
+            .unwrap();
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "31.5"))
+            .unwrap();
+
+        waiter.await.unwrap();
+    });
+}
+
+#[test]
+fn numeric_sensor_predicate_for_at_least_resets_when_predicate_becomes_false() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "29.0")]);
+        let waiter_ctx = ctx.clone();
+        let waiter_sensor = sensor.clone();
+        let mut waiter = ctx.spawn(async move {
+            waiter_sensor
+                .wait_until_matching(&waiter_ctx, |value| *value > 30.0)
+                .for_at_least(Duration::from_millis(20))
+                .await
+        });
+
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "31.0"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "29.0"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            ctx.timeout(Duration::from_millis(1), &mut waiter)
+                .await
+                .unwrap(),
+            TimeoutResult::TimedOut
+        );
+
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "31.0"))
+            .unwrap();
+
+        waiter.await.unwrap();
+    });
+}
+
+#[test]
+fn numeric_sensor_predicate_within_returns_timed_out() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "29.0")]);
+
+        assert_eq!(
+            sensor
+                .wait_until_matching(&ctx, |value| *value > 30.0)
+                .within(Duration::from_millis(1))
+                .await
+                .unwrap(),
+            WaitResult::TimedOut
+        );
+    });
+}
+
+#[test]
+fn numeric_sensor_non_numeric_state_returns_invalid_state() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "unknown")]);
+
+        assert!(matches!(
+            sensor
+                .expect_matching(&ctx, |value| *value > 30.0)
+                .await,
+            Err(Error::InvalidState { entity_id, .. }) if entity_id == *sensor.entity_id()
+        ));
+
+        assert!(matches!(
+            sensor
+                .wait_until_matching(&ctx, |value| *value > 30.0)
+                .await,
+            Err(Error::InvalidState { entity_id, .. }) if entity_id == *sensor.entity_id()
+        ));
+    });
+}
+
 struct RecordingRestTransport {
     requests: Arc<Mutex<Vec<RestStateRequest>>>,
     responses: Arc<Mutex<Vec<Result<RestStateResponse, RestStateError>>>>,
