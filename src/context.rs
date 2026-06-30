@@ -1,8 +1,9 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use crate::{
-    BinarySensor, EntityId, Error, HomeAssistantClient, Light, Result, StateChangeStream,
-    TaskHandle, TimeoutResult, TimerCompletionGuard, TimerControl, TimerHandle, wait_cancelled,
+    BinarySensor, EntityId, Error, GlobalStateWait, HomeAssistantClient, Light, Result, StateCache,
+    StateChangeStream, TaskHandle, TimeoutResult, TimerCompletionGuard, TimerControl, TimerHandle,
+    wait_cancelled,
 };
 
 #[derive(Clone, Debug)]
@@ -166,6 +167,13 @@ impl Context {
             self.home_assistant.generation.state_changes.subscribe(),
             Some(entity.clone()),
         )
+    }
+
+    pub fn wait_until_state<F>(&self, predicate: F) -> GlobalStateWait<'_, F>
+    where
+        F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+    {
+        GlobalStateWait::new(self, predicate)
     }
 
     pub fn binary_sensor_changes(&self, sensor: &BinarySensor) -> StateChangeStream {

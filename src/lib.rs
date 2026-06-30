@@ -46,7 +46,8 @@ pub use streams::{EventStreamError, RawEventStream, StateChangeStream};
 pub use timer::{TaskHandle, TimerHandle};
 pub(crate) use timer::{TimerCompletionGuard, TimerControl, wait_cancelled};
 pub use wait::{
-    HoldResult, StateExpectation, StateWait, TimedStateWait, TimeoutResult, WaitResult,
+    GlobalStateWait, HoldResult, StateExpectation, StateWait, TimedGlobalStateWait, TimedStateWait,
+    TimeoutResult, WaitResult,
 };
 pub(crate) use ws::WsTransport;
 

@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    BinaryState, Context, EntityId, EntityState, Error, Result, StateChangeStream,
+    BinaryState, Context, EntityId, EntityState, Error, Result, StateCache, StateChangeStream,
     StateChangedEvent,
 };
 
@@ -114,6 +114,101 @@ impl<T> fmt::Debug for TimedStateWait<'_, T> {
             .field("wait", &self.wait)
             .field("timeout", &self.timeout)
             .finish()
+    }
+}
+
+pub struct GlobalStateWait<'a, F> {
+    ctx: &'a Context,
+    predicate: F,
+    hold_for: Option<Duration>,
+}
+
+impl<F> fmt::Debug for GlobalStateWait<'_, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GlobalStateWait")
+            .field("ctx", &self.ctx)
+            .field("hold_for", &self.hold_for)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, F> GlobalStateWait<'a, F>
+where
+    F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+{
+    pub(crate) fn new(ctx: &'a Context, predicate: F) -> Self {
+        Self {
+            ctx,
+            predicate,
+            hold_for: None,
+        }
+    }
+
+    pub fn for_at_least(mut self, duration: Duration) -> Self {
+        self.hold_for = Some(duration);
+        self
+    }
+
+    pub fn within(self, duration: Duration) -> TimedGlobalStateWait<'a, F> {
+        TimedGlobalStateWait {
+            wait: self,
+            timeout: duration,
+        }
+    }
+}
+
+impl<'a, F> IntoFuture for GlobalStateWait<'a, F>
+where
+    F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+{
+    type Output = Result<()>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move { run_global_state_wait(self).await })
+    }
+}
+
+pub struct TimedGlobalStateWait<'a, F> {
+    wait: GlobalStateWait<'a, F>,
+    timeout: Duration,
+}
+
+impl<F> fmt::Debug for TimedGlobalStateWait<'_, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TimedGlobalStateWait")
+            .field("wait", &self.wait)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl<'a, F> IntoFuture for TimedGlobalStateWait<'a, F>
+where
+    F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+{
+    type Output = Result<WaitResult>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            match self.ctx_timeout().await? {
+                TimeoutResult::Completed(()) => Ok(WaitResult::Satisfied),
+                TimeoutResult::TimedOut => Ok(WaitResult::TimedOut),
+            }
+        })
+    }
+}
+
+impl<'a, F> TimedGlobalStateWait<'a, F>
+where
+    F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+{
+    async fn ctx_timeout(self) -> Result<TimeoutResult<()>> {
+        self.wait
+            .ctx
+            .timeout(self.timeout, run_global_state_wait(self.wait))
+            .await
     }
 }
 
@@ -289,6 +384,32 @@ where
     }
 }
 
+async fn run_global_state_wait<F>(wait: GlobalStateWait<'_, F>) -> Result<()>
+where
+    F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+{
+    wait.ctx.home_assistant.ensure_generation_active()?;
+    let mut changes = StateChangeStream::new(
+        wait.ctx.home_assistant.generation.state_changes.subscribe(),
+        None,
+    );
+
+    if evaluate_global_state(wait.ctx, &wait.predicate)?
+        && hold_global_state_for(wait.ctx, &mut changes, &wait.predicate, wait.hold_for).await?
+    {
+        return Ok(());
+    }
+
+    loop {
+        let _event = next_state_change(wait.ctx, &mut changes).await?;
+        if evaluate_global_state(wait.ctx, &wait.predicate)?
+            && hold_global_state_for(wait.ctx, &mut changes, &wait.predicate, wait.hold_for).await?
+        {
+            return Ok(());
+        }
+    }
+}
+
 async fn run_state_expectation<T>(expectation: StateExpectation<'_, T>) -> Result<HoldResult<T>>
 where
     T: Clone + Send + Sync + 'static,
@@ -377,6 +498,44 @@ where
                 let event = event?;
                 let actual = event_state(&event, entity_id, decode)?;
                 if !condition(&actual) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+}
+
+fn evaluate_global_state<F>(ctx: &Context, predicate: &F) -> Result<bool>
+where
+    F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+{
+    predicate(&StateCache::new(&ctx.home_assistant.generation))
+}
+
+async fn hold_global_state_for<F>(
+    ctx: &Context,
+    changes: &mut StateChangeStream,
+    predicate: &F,
+    hold_for: Option<Duration>,
+) -> Result<bool>
+where
+    F: Fn(&StateCache) -> Result<bool> + Send + Sync + 'static,
+{
+    let Some(hold_for) = hold_for else {
+        return Ok(true);
+    };
+    if hold_for.is_zero() {
+        return Ok(true);
+    }
+
+    let deadline = tokio::time::sleep(hold_for);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            () = &mut deadline => return Ok(true),
+            event = next_state_change(ctx, changes) => {
+                let _event = event?;
+                if !evaluate_global_state(ctx, predicate)? {
                     return Ok(false);
                 }
             }
