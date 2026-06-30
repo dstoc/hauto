@@ -1424,6 +1424,165 @@ fn numeric_sensor_non_numeric_state_returns_invalid_state() {
     });
 }
 
+#[test]
+fn numeric_sensor_read_decodes_hit_miss_and_invalid_state_from_cache() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let missing = Sensor::<f64>::new("sensor.missing").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "21.5")]);
+        let cache = StateCache::new(&ctx.home_assistant.generation);
+
+        assert_eq!(sensor.read(&cache).unwrap(), Some(21.5));
+        assert_eq!(missing.read(&cache).unwrap(), None);
+
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "unknown"))
+            .unwrap();
+        let cache = StateCache::new(&ctx.home_assistant.generation);
+        assert!(matches!(
+            sensor.read(&cache),
+            Err(Error::InvalidState { entity_id, .. }) if entity_id == *sensor.entity_id()
+        ));
+    });
+}
+
+#[test]
+fn global_state_wait_completes_from_initial_cache_state() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "31.0")]);
+
+        ctx.wait_until_state(move |state| {
+            Ok(sensor
+                .read(state)?
+                .is_some_and(|temperature| temperature > 30.0))
+        })
+        .await
+        .unwrap();
+    });
+}
+
+#[test]
+fn global_state_wait_wakes_on_unrelated_change_and_finishes_when_entities_match() {
+    run_async(async {
+        let temperature = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let humidity = Sensor::<f64>::new("sensor.humidity").unwrap();
+        let ctx = Context::with_seeded_states([
+            sample_state("sensor.temperature", "19.0"),
+            sample_state("sensor.humidity", "60.0"),
+            sample_state("binary_sensor.window", "off"),
+        ]);
+        let evaluations = Arc::new(AtomicUsize::new(0));
+        let waiter_ctx = ctx.clone();
+        let waiter_temperature = temperature.clone();
+        let waiter_humidity = humidity.clone();
+        let waiter_evaluations = evaluations.clone();
+        let mut waiter = ctx.spawn(async move {
+            waiter_ctx
+                .wait_until_state(move |state| {
+                    waiter_evaluations.fetch_add(1, Ordering::AcqRel);
+                    let temperature_matches = waiter_temperature
+                        .read(state)?
+                        .is_some_and(|temperature| temperature >= 20.0);
+                    let humidity_matches = waiter_humidity
+                        .read(state)?
+                        .is_some_and(|humidity| humidity <= 50.0);
+                    Ok(temperature_matches && humidity_matches)
+                })
+                .await
+        });
+
+        wait_for_predicate_evaluations(&evaluations, 1).await;
+        ctx.home_assistant()
+            .cache_state(sample_state("binary_sensor.window", "on"))
+            .unwrap();
+        wait_for_predicate_evaluations(&evaluations, 2).await;
+        assert_eq!(
+            ctx.timeout(Duration::from_millis(1), &mut waiter)
+                .await
+                .unwrap(),
+            TimeoutResult::TimedOut
+        );
+
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "21.0"))
+            .unwrap();
+        wait_for_predicate_evaluations(&evaluations, 3).await;
+        assert_eq!(
+            ctx.timeout(Duration::from_millis(1), &mut waiter)
+                .await
+                .unwrap(),
+            TimeoutResult::TimedOut
+        );
+
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.humidity", "45.0"))
+            .unwrap();
+        waiter.await.unwrap();
+    });
+}
+
+#[test]
+fn global_state_wait_for_at_least_resets_when_predicate_becomes_false() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "29.0")]);
+        let waiter_ctx = ctx.clone();
+        let waiter_sensor = sensor.clone();
+        let mut waiter = ctx.spawn(async move {
+            waiter_ctx
+                .wait_until_state(move |state| {
+                    Ok(waiter_sensor
+                        .read(state)?
+                        .is_some_and(|temperature| temperature > 30.0))
+                })
+                .for_at_least(Duration::from_millis(20))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "31.0"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "29.0"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            ctx.timeout(Duration::from_millis(1), &mut waiter)
+                .await
+                .unwrap(),
+            TimeoutResult::TimedOut
+        );
+
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "31.0"))
+            .unwrap();
+        waiter.await.unwrap();
+    });
+}
+
+#[test]
+fn global_state_wait_within_returns_timed_out() {
+    run_async(async {
+        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "29.0")]);
+
+        assert_eq!(
+            ctx.wait_until_state(move |state| {
+                Ok(sensor
+                    .read(state)?
+                    .is_some_and(|temperature| temperature > 30.0))
+            })
+            .within(Duration::from_millis(1))
+            .await
+            .unwrap(),
+            WaitResult::TimedOut
+        );
+    });
+}
+
 struct RecordingRestTransport {
     requests: Arc<Mutex<Vec<RestStateRequest>>>,
     responses: Arc<Mutex<Vec<Result<RestStateResponse, RestStateError>>>>,
@@ -1463,6 +1622,21 @@ fn run_async(future: impl Future<Output = ()>) {
         .build()
         .unwrap()
         .block_on(future);
+}
+
+async fn wait_for_predicate_evaluations(evaluations: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_millis(50), async {
+        while evaluations.load(Ordering::Acquire) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "expected at least {expected} predicate evaluations, got {}",
+            evaluations.load(Ordering::Acquire)
+        )
+    });
 }
 
 async fn spawn_test_ws_server<F, Fut>(handler: F) -> (String, tokio::task::JoinHandle<()>)
