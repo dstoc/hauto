@@ -35,40 +35,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let light = Light::new(required_env("HAUTO_LIGHT")?)?;
 
     App::new(home_assistant_url, home_assistant_token)
-        .automation_fn("global temperature and humidity threshold light", move |ctx| {
-            let temperature = temperature.clone();
-            let humidity = humidity.clone();
-            let light = light.clone();
+        .automation_fn(
+            "global temperature and humidity threshold light",
+            move |ctx| {
+                let temperature = temperature.clone();
+                let humidity = humidity.clone();
+                let light = light.clone();
 
-            async move {
-                println!(
-                    "Waiting for {} >= {temperature_threshold} and {} <= {humidity_threshold}",
-                    temperature.entity_id(),
-                    humidity.entity_id()
-                );
+                async move {
+                    println!(
+                        "Waiting for {} >= {temperature_threshold} and {} <= {humidity_threshold}",
+                        temperature.entity_id(),
+                        humidity.entity_id()
+                    );
 
-                ctx.wait_until_state(move |state| {
-                    let Some(temperature) = temperature.read(state)? else {
-                        return Ok(false);
-                    };
-                    let Some(humidity) = humidity.read(state)? else {
-                        return Ok(false);
-                    };
+                    ctx.wait_until_state(move |state| {
+                        let Some(temperature) = temperature.read(state)? else {
+                            return Ok(false);
+                        };
+                        let Some(humidity) = humidity.read(state)? else {
+                            return Ok(false);
+                        };
 
-                    Ok(temperature >= temperature_threshold && humidity <= humidity_threshold)
-                })
-                .for_at_least(Duration::from_secs(30))
-                .await?;
+                        Ok(temperature >= temperature_threshold && humidity <= humidity_threshold)
+                    })
+                    .for_at_least(Duration::from_secs(30))
+                    .await?;
 
-                println!(
-                    "Thresholds held for 30 seconds; turning {} on",
-                    light.entity_id()
-                );
-                light.turn_on(&ctx, LightTurnOn::default()).await?;
+                    println!(
+                        "Thresholds held for 30 seconds; turning {} on",
+                        light.entity_id()
+                    );
+                    light.turn_on(&ctx, LightTurnOn::default()).await?;
 
-                Ok(())
-            }
-        })
+                    Ok(())
+                }
+            },
+        )
         .run()
         .await?;
 

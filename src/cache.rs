@@ -1,6 +1,6 @@
 use crate::{EntityId, EntityState, client::GenerationState};
 
-/// Read-only access to a Home Assistant state cache snapshot.
+/// Read-only access to the current Home Assistant state cache.
 ///
 /// `StateCache` is intentionally a thin wrapper around the crate's internal
 /// generation cache. It lets typed entity handles synchronously decode cached
