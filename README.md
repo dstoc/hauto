@@ -235,6 +235,7 @@ Available examples:
 - `light_toggle` — turn a light on and off every 10 seconds and print state changes.
 - `occupancy_light` — occupancy sensor with delayed turn-off.
 - `appliance_power_status` — derive washer/dryer status from power sensors.
+- `bathroom_exhaust_fan` — shared fan control from humidity and occupancy.
 - `temperature_threshold` — typed numeric sensor predicate.
 - `global_wait` — compound predicate over temperature and humidity sensors.
 - `timer_cancel` — delayed action cancellation.
