@@ -1,0 +1,75 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # crates.io publishing is intentionally disabled while hauto is pre-release.
+  # Uncomment this job once publishing is desired and CRATES_IO_TOKEN is
+  # configured for the repository.
+  #
+  # publish-crate:
+  #   needs: release-please
+  #   if: ${{ needs.release-please.outputs.release_created == 'true' }}
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: write
+  #   env:
+  #     CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+  #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #     TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+  #     VERSION: ${{ needs.release-please.outputs.version }}
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #
+  #     - name: Publish crate
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #
+  #         crate_is_published() {
+  #           cargo search hauto --limit 1 | grep -E "^hauto = \"${VERSION}\""
+  #         }
+  #
+  #         if crate_is_published; then
+  #           echo "hauto ${VERSION} is already published"
+  #         else
+  #           cargo publish --locked
+  #         fi
+  #
+  #     - name: Publish GitHub release
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #
+  #         crates_url="https://crates.io/crates/hauto/${VERSION}"
+  #         notes_file="$(mktemp)"
+  #
+  #         gh release view "$TAG_NAME" --json body --jq .body > "$notes_file"
+  #         sed -i '/^## crates.io$/,/^## /{ /^## /!d; /^## crates.io$/d; }' "$notes_file"
+  #         {
+  #           printf '\n## crates.io\n\n'
+  #           printf '%s\n' "$crates_url"
+  #         } >> "$notes_file"
+  #
+  #         gh release edit "$TAG_NAME" --notes-file "$notes_file"
+  #         gh release edit "$TAG_NAME" --draft=false
