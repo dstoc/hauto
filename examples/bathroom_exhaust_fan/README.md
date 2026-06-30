@@ -1,40 +1,47 @@
 # Bathroom exhaust fan
 
-This example controls one shared exhaust fan for two bathrooms.
+This example controls one shared exhaust fan for two bathrooms by composing
+small automations through Home Assistant state.
 
-Humidity is the primary safety trigger. Occupancy is a comfort/odour trigger
-only outside quiet hours, so a normal overnight bathroom visit does not start
-the fan, but an overnight shower still does.
+It has three automations:
+
+1. bathroom 1 humidity status publisher
+2. bathroom 2 humidity status publisher
+3. shared fan controller
+
+The humidity automations publish derived status sensors:
 
 ```text
-fan_on = bathroom_1_demand OR bathroom_2_demand
+sensor.bathroom_1_excess_humidity = normal | humid | unknown
+sensor.bathroom_2_excess_humidity = normal | humid | unknown
 ```
 
-Each bathroom has independent state. The shared fan runs when either bathroom
-needs it.
-
-## Demand model
-
-Each bathroom can demand the fan for humidity or occupancy:
+The fan controller then consumes those status sensors plus occupancy sensors:
 
 ```text
-bathroom_demand = humidity_demand OR daytime_occupancy_demand
+fan_on =
+    bathroom_1_humidity_is_humid
+    OR bathroom_2_humidity_is_humid
+    OR daytime_bathroom_1_occupancy_demand
+    OR daytime_bathroom_2_occupancy_demand
 ```
 
 During quiet hours, occupancy is ignored:
 
 ```text
 00:00 <= local time < 08:00:
-    bathroom_demand = humidity_demand only
+    fan_on =
+        bathroom_1_humidity_is_humid
+        OR bathroom_2_humidity_is_humid
 ```
 
-The example defaults to quiet hours from midnight to 08:00. It uses a fixed UTC
-offset from `HAUTO_LOCAL_UTC_OFFSET_MINUTES` to calculate local time without
-adding a time-zone dependency.
+That split keeps the humidity model observable and reusable. You can see the
+derived humidity status and diagnostic attributes in Home Assistant, while the
+fan controller remains a small arbitration automation.
 
-## Humidity model
+## Humidity status publisher
 
-The example compares each bathroom against a nearby ambient room, using
+Each bathroom compares its humidity against a nearby ambient room, using
 absolute humidity where temperature is available:
 
 ```text
@@ -43,7 +50,7 @@ ambient_absolute_humidity  = f(ambient_temp, ambient_rh)
 humidity_excess = bathroom_absolute_humidity - ambient_absolute_humidity
 ```
 
-Humidity demand starts when any of these are true:
+Humidity status becomes `humid` when any of these are true:
 
 ```text
 absolute humidity excess > 2.0 g/m³
@@ -53,8 +60,8 @@ OR bathroom RH rises by > 6% over 5 minutes
 OR bathroom absolute humidity rises by > 0.6 g/m³ over 5 minutes
 ```
 
-Humidity demand clears only after the bathroom has dried back down for 5
-continuous minutes:
+Humidity status returns to `normal` only after the bathroom has dried back down
+for 5 continuous minutes and the minimum humid runtime has elapsed:
 
 ```text
 absolute humidity excess < 0.8 g/m³
@@ -63,15 +70,29 @@ AND bathroom RH < 65%
 ```
 
 The start and clear thresholds are deliberately different. That hysteresis
-keeps the fan from flapping around a single threshold.
+keeps the status sensor from flapping around a single threshold.
+
+The status sensor attributes include:
+
+- `reason`
+- `bathroom_relative_humidity`
+- `ambient_relative_humidity`
+- `bathroom_absolute_humidity`
+- `ambient_absolute_humidity`
+- `absolute_humidity_excess`
+- `relative_humidity_excess`
 
 Possible improvement: the example records rate-of-rise samples whenever the
-automation wakes for a relevant state change or poll tick, so sample spacing is
+publisher wakes for a relevant state change or poll tick, so sample spacing is
 not perfectly constant. For sharper shower detection, keep a fixed-cadence
 humidity history, such as one sample every 30 seconds, and use sensor-change
-events only to wake the automation for immediate threshold re-evaluation.
+events only to wake the publisher for immediate threshold re-evaluation.
 
-## Occupancy model
+## Fan controller
+
+Humidity is the primary safety trigger. Occupancy is a comfort/odour trigger
+only outside quiet hours, so a normal overnight bathroom visit does not start
+the fan, but an overnight shower still does.
 
 Outside quiet hours:
 
@@ -82,23 +103,26 @@ clear -> keep fan on for 7 minutes
 
 During quiet hours, occupancy is ignored. If midnight arrives while the fan is
 running only because of occupancy or post-occupancy drying, the fan is turned
-off. Humidity demand keeps the fan running until humidity clears or the maximum
-runtime guard applies.
+off. Humidity demand keeps the fan running until the corresponding derived
+humidity status returns to `normal`.
 
-## Runtime guards
-
-Defaults:
+Fan runtime guard defaults:
 
 ```text
 minimum_on_time = 2 minutes
 minimum_off_time = 1 minute
+```
+
+Humidity publisher guard defaults:
+
+```text
 humidity_minimum_run = 10 minutes
 humidity_maximum_run = 90 minutes
 ```
 
-When humidity demand starts, the fan runs for at least 10 minutes. After that,
-it keeps running until the clear condition holds. After 90 minutes, it stops
-unless the bathroom is still extremely humid (`RH > 80%`).
+After 90 minutes, a humidity publisher returns to `normal` unless the bathroom
+is still extremely humid (`RH > 80%`). This prevents a bad sensor or unusual
+weather condition from running the fan indefinitely.
 
 ## Entity configuration
 
@@ -116,10 +140,12 @@ export HAUTO_AMBIENT_HUMIDITY='sensor.hall_humidity'
 export HAUTO_BATHROOM_1_TEMP='sensor.main_bathroom_temperature'
 export HAUTO_BATHROOM_1_HUMIDITY='sensor.main_bathroom_humidity'
 export HAUTO_BATHROOM_1_OCCUPANCY='binary_sensor.main_bathroom_occupancy'
+export HAUTO_BATHROOM_1_HUMIDITY_STATUS='sensor.bathroom_1_excess_humidity'
 
 export HAUTO_BATHROOM_2_TEMP='sensor.ensuite_temperature'
 export HAUTO_BATHROOM_2_HUMIDITY='sensor.ensuite_humidity'
 export HAUTO_BATHROOM_2_OCCUPANCY='binary_sensor.ensuite_occupancy'
+export HAUTO_BATHROOM_2_HUMIDITY_STATUS='sensor.bathroom_2_excess_humidity'
 ```
 
 Optional quiet-hour overrides:
@@ -129,6 +155,10 @@ export HAUTO_QUIET_START_MINUTE=0
 export HAUTO_QUIET_END_MINUTE=480
 export HAUTO_LOCAL_UTC_OFFSET_MINUTES=600
 ```
+
+The example defaults to quiet hours from midnight to 08:00. It uses a fixed UTC
+offset from `HAUTO_LOCAL_UTC_OFFSET_MINUTES` to calculate local time without
+adding a time-zone dependency.
 
 Run with:
 
