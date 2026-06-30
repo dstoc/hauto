@@ -116,9 +116,8 @@ async fn read_power(
     ctx: &Context,
     power_entity: &Sensor<SensorValue<f64>>,
 ) -> hauto::Result<Option<f64>> {
-    match power_entity.state(ctx).await {
-        Ok(state) => decode_power_state(power_entity.entity_id(), &state.state)
-            .map(|value| value.into_value()),
+    match power_entity.get(ctx).await {
+        Ok(value) => Ok(value.into_value()),
         Err(HautoError::EntityNotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
@@ -176,19 +175,5 @@ async fn next_power_change(
             Ok(())
         }
         () = ctx.cancelled() => Err(HautoError::Cancelled),
-    }
-}
-
-fn decode_power_state(entity_id: &EntityId, value: &str) -> hauto::Result<SensorValue<f64>> {
-    match value {
-        "" | "unknown" => Ok(SensorValue::Unknown),
-        "unavailable" => Ok(SensorValue::Unavailable),
-        value => value
-            .parse::<f64>()
-            .map(SensorValue::Value)
-            .map_err(|error| HautoError::InvalidState {
-                entity_id: entity_id.clone(),
-                reason: format!("expected numeric state, got `{value}`: {error}"),
-            }),
     }
 }

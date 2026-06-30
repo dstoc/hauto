@@ -1447,6 +1447,33 @@ fn numeric_sensor_read_decodes_hit_miss_and_invalid_state_from_cache() {
 }
 
 #[test]
+fn typed_entity_get_fetches_current_state_and_decodes_it() {
+    run_async(async {
+        let light = Light::new("light.office").unwrap();
+        let temperature = Sensor::<f64>::new("sensor.temperature").unwrap();
+        let unavailable_temperature =
+            Sensor::<SensorValue<f64>>::new("sensor.unavailable_temperature").unwrap();
+        let missing = Sensor::<SensorValue<f64>>::new("sensor.missing").unwrap();
+        let ctx = Context::with_seeded_states([
+            sample_state("light.office", "on"),
+            sample_state("sensor.temperature", "21.5"),
+            sample_state("sensor.unavailable_temperature", "unavailable"),
+        ]);
+
+        assert_eq!(light.get(&ctx).await.unwrap(), BinaryState::On);
+        assert_eq!(temperature.get(&ctx).await.unwrap(), 21.5);
+        assert_eq!(
+            unavailable_temperature.get(&ctx).await.unwrap(),
+            SensorValue::Unavailable
+        );
+        assert!(matches!(
+            missing.get(&ctx).await,
+            Err(Error::EntityNotFound(entity_id)) if entity_id == *missing.entity_id()
+        ));
+    });
+}
+
+#[test]
 fn sensor_value_numeric_sensor_wait_until_matching_completes_after_sentinel_state_change() {
     run_async(async {
         let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();

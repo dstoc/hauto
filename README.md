@@ -84,6 +84,15 @@ let temperature = hauto::Sensor::<f64>::new("sensor.office_temperature")?;
 Existence and state validity are checked when reading state, waiting for state,
 or calling Home Assistant.
 
+Use `get(&ctx)` to fetch and decode the current state for a typed entity:
+
+```rust
+let temperature = temperature.get(&ctx).await?;
+```
+
+Use `read(&StateCache)` inside global state predicates, where the current cache
+view is already available synchronously.
+
 Initial typed handles include:
 
 - `BinarySensor`

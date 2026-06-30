@@ -257,6 +257,12 @@ trait TypedReadableEntityExt: TypedReadableEntity {
             .transpose()
     }
 
+    async fn get_typed(&self, ctx: &Context) -> Result<Self::State> {
+        let entity_id = self.entity_id();
+        let raw = ctx.home_assistant().get_state_raw(entity_id).await?;
+        Self::decode_state(entity_id, &raw)
+    }
+
     fn wait_until_matching_typed<'a, F>(
         &'a self,
         ctx: &'a Context,
@@ -335,6 +341,10 @@ macro_rules! binary_state_entity {
                 self.read_typed(cache)
             }
 
+            pub async fn get(&self, ctx: &Context) -> Result<BinaryState> {
+                self.get_typed(ctx).await
+            }
+
             pub fn wait_until<'a>(
                 &'a self,
                 ctx: &'a Context,
@@ -379,6 +389,10 @@ macro_rules! sensor_state_entity {
         impl Sensor<$state> {
             pub fn read(&self, cache: &StateCache<'_>) -> Result<Option<$state>> {
                 self.read_typed(cache)
+            }
+
+            pub async fn get(&self, ctx: &Context) -> Result<$state> {
+                self.get_typed(ctx).await
             }
 
             pub fn wait_until_matching<'a, F>(
