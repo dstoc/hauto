@@ -1447,6 +1447,95 @@ fn numeric_sensor_read_decodes_hit_miss_and_invalid_state_from_cache() {
 }
 
 #[test]
+fn sensor_value_numeric_sensor_wait_until_matching_completes_after_sentinel_state_change() {
+    run_async(async {
+        let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "29.5")]);
+        let waiter_ctx = ctx.clone();
+        let waiter_sensor = sensor.clone();
+        let waiter = ctx.spawn(async move {
+            waiter_sensor
+                .wait_until_matching(&waiter_ctx, |value| matches!(value, SensorValue::Unknown))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "unknown"))
+            .unwrap();
+
+        waiter.await.unwrap();
+    });
+}
+
+#[test]
+fn sensor_value_numeric_sensor_read_decodes_values_sentinels_miss_and_invalid_state() {
+    run_async(async {
+        let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
+        let missing = Sensor::<SensorValue<f64>>::new("sensor.missing").unwrap();
+        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "21.5")]);
+        let cache = StateCache::new(&ctx.home_assistant.generation);
+
+        assert_eq!(sensor.read(&cache).unwrap(), Some(SensorValue::Value(21.5)));
+        assert_eq!(missing.read(&cache).unwrap(), None);
+
+        for (raw, expected) in [
+            ("unknown", SensorValue::Unknown),
+            ("unavailable", SensorValue::Unavailable),
+            ("", SensorValue::Unknown),
+        ] {
+            ctx.home_assistant()
+                .cache_state(sample_state("sensor.temperature", raw))
+                .unwrap();
+            let cache = StateCache::new(&ctx.home_assistant.generation);
+            assert_eq!(sensor.read(&cache).unwrap(), Some(expected));
+        }
+
+        ctx.home_assistant()
+            .cache_state(sample_state("sensor.temperature", "not-a-number"))
+            .unwrap();
+        let cache = StateCache::new(&ctx.home_assistant.generation);
+        assert!(matches!(
+            sensor.read(&cache),
+            Err(Error::InvalidState { entity_id, .. }) if entity_id == *sensor.entity_id()
+        ));
+    });
+}
+
+#[test]
+fn sensor_value_numeric_sensor_expect_matching_for_at_least_interrupts_on_sentinel_states() {
+    run_async(async {
+        for (raw, expected) in [
+            ("unknown", SensorValue::Unknown),
+            ("unavailable", SensorValue::Unavailable),
+        ] {
+            let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
+            let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "31.0")]);
+            let expectation_ctx = ctx.clone();
+            let expectation_sensor = sensor.clone();
+            let expectation = ctx.spawn(async move {
+                expectation_sensor
+                    .expect_matching(&expectation_ctx, |value| {
+                        value.as_value().is_some_and(|value| *value > 30.0)
+                    })
+                    .for_at_least(Duration::from_millis(50))
+                    .await
+            });
+
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            ctx.home_assistant()
+                .cache_state(sample_state("sensor.temperature", raw))
+                .unwrap();
+
+            assert_eq!(
+                expectation.await.unwrap(),
+                HoldResult::Interrupted { actual: expected }
+            );
+        }
+    });
+}
+
+#[test]
 fn global_state_wait_completes_from_initial_cache_state() {
     run_async(async {
         let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();

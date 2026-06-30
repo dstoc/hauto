@@ -6,14 +6,12 @@
 
 use std::time::Duration;
 
-use hauto::{
-    Context, EntityId, EntityState, Error as HautoError, Sensor, StateChangeStream, StateWrite,
-};
+use hauto::{Context, EntityId, Error as HautoError, HoldResult, Sensor, SensorValue, StateWrite};
 use serde_json::json;
 
 #[derive(Clone, Debug)]
 pub struct AppliancePowerStatusConfig {
-    pub power_entity: Sensor<f64>,
+    pub power_entity: Sensor<SensorValue<f64>>,
     pub status_entity: EntityId,
     pub friendly_name: String,
     pub off_below: f64,
@@ -71,54 +69,56 @@ impl AppliancePowerStatus {
     }
 
     pub async fn run(self, ctx: Context) -> hauto::Result<()> {
-        let mut changes = ctx.state_changes(self.config.power_entity.entity_id());
-
         loop {
             let Some(power) = read_power(&ctx, &self.config.power_entity).await? else {
                 set_status(&ctx, &self.config, ApplianceStatus::Unknown).await?;
-                next_power_change(&ctx, &mut changes).await?;
+                next_power_change(&ctx, &self.config.power_entity).await?;
                 continue;
             };
 
             if power >= self.config.idle_below {
                 set_status(&ctx, &self.config, ApplianceStatus::Running).await?;
-                next_power_change(&ctx, &mut changes).await?;
+                next_power_change(&ctx, &self.config.power_entity).await?;
                 continue;
             }
 
             if power >= self.config.off_below {
-                if hold_power_below(
+                if power_held_below(
                     &ctx,
-                    &mut changes,
+                    &self.config.power_entity,
                     self.config.idle_below,
                     self.config.idle_delay,
                 )
                 .await?
                 {
                     set_status(&ctx, &self.config, ApplianceStatus::Idle).await?;
-                    next_power_change(&ctx, &mut changes).await?;
+                    next_power_change(&ctx, &self.config.power_entity).await?;
                 }
                 continue;
             }
 
-            if hold_power_below(
+            if power_held_below(
                 &ctx,
-                &mut changes,
+                &self.config.power_entity,
                 self.config.off_below,
                 self.config.off_delay,
             )
             .await?
             {
                 set_status(&ctx, &self.config, ApplianceStatus::Off).await?;
-                next_power_change(&ctx, &mut changes).await?;
+                next_power_change(&ctx, &self.config.power_entity).await?;
             }
         }
     }
 }
 
-async fn read_power(ctx: &Context, power_entity: &Sensor<f64>) -> hauto::Result<Option<f64>> {
+async fn read_power(
+    ctx: &Context,
+    power_entity: &Sensor<SensorValue<f64>>,
+) -> hauto::Result<Option<f64>> {
     match power_entity.state(ctx).await {
-        Ok(state) => Ok(to_float(&state)),
+        Ok(state) => decode_power_state(power_entity.entity_id(), &state.state)
+            .map(|value| value.into_value()),
         Err(HautoError::EntityNotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
@@ -145,56 +145,50 @@ async fn set_status(
     Ok(())
 }
 
-async fn hold_power_below(
+async fn power_held_below(
     ctx: &Context,
-    changes: &mut StateChangeStream,
+    power_entity: &Sensor<SensorValue<f64>>,
     threshold: f64,
     duration: Duration,
 ) -> hauto::Result<bool> {
-    if duration.is_zero() {
-        return Ok(true);
-    }
-
-    let deadline = tokio::time::sleep(duration);
-    tokio::pin!(deadline);
-
-    loop {
-        tokio::select! {
-            () = &mut deadline => return Ok(true),
-            power = next_power_change(ctx, changes) => {
-                let Some(power) = power? else {
-                    return Ok(false);
-                };
-                if power >= threshold {
-                    return Ok(false);
-                }
-            }
-        }
-    }
+    Ok(matches!(
+        power_entity
+            .expect_matching(ctx, move |value| {
+                value.as_value().is_some_and(|power| *power < threshold)
+            })
+            .for_at_least(duration)
+            .await?,
+        HoldResult::Held
+    ))
 }
 
 async fn next_power_change(
     ctx: &Context,
-    changes: &mut StateChangeStream,
-) -> hauto::Result<Option<f64>> {
+    power_entity: &Sensor<SensorValue<f64>>,
+) -> hauto::Result<()> {
+    let mut changes = ctx.state_changes(power_entity.entity_id());
+
     tokio::select! {
         event = changes.next() => {
-            let event = event
+            event
                 .ok_or_else(|| HautoError::Connection("power state change stream closed".to_string()))?
                 .map_err(HautoError::EventStream)?;
-            Ok(event.new_state.as_ref().and_then(to_float))
+            Ok(())
         }
         () = ctx.cancelled() => Err(HautoError::Cancelled),
     }
 }
 
-fn to_float(state: &EntityState) -> Option<f64> {
-    to_float_str(&state.state)
-}
-
-fn to_float_str(value: &str) -> Option<f64> {
+fn decode_power_state(entity_id: &EntityId, value: &str) -> hauto::Result<SensorValue<f64>> {
     match value {
-        "" | "unknown" | "unavailable" => None,
-        value => value.parse::<f64>().ok(),
+        "" | "unknown" => Ok(SensorValue::Unknown),
+        "unavailable" => Ok(SensorValue::Unavailable),
+        value => value
+            .parse::<f64>()
+            .map(SensorValue::Value)
+            .map_err(|error| HautoError::InvalidState {
+                entity_id: entity_id.clone(),
+                reason: format!("expected numeric state, got `{value}`: {error}"),
+            }),
     }
 }

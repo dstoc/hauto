@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    BinaryState, Context, EntityState, Error, LightTurnOff, LightTurnOn, Result, StateCache,
-    StateExpectation, StateWait, service_entity,
+    BinaryState, Context, EntityState, Error, LightTurnOff, LightTurnOn, Result, SensorValue,
+    StateCache, StateExpectation, StateWait, service_entity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -192,6 +192,7 @@ pub(crate) trait StateDecoder<T> {
 
 pub(crate) struct BinaryStateDecoder;
 pub(crate) struct F64StateDecoder;
+pub(crate) struct SensorValueF64Decoder;
 pub(crate) struct StringStateDecoder;
 
 impl StateDecoder<BinaryState> for BinaryStateDecoder {
@@ -211,6 +212,22 @@ impl StateDecoder<f64> for F64StateDecoder {
                 entity_id: entity_id.clone(),
                 reason: format!("expected numeric state, got `{}`: {error}", raw.state),
             })
+    }
+}
+
+impl StateDecoder<SensorValue<f64>> for SensorValueF64Decoder {
+    fn decode_state(entity_id: &EntityId, raw: &EntityState) -> Result<SensorValue<f64>> {
+        match raw.state.as_str() {
+            "" | "unknown" => Ok(SensorValue::Unknown),
+            "unavailable" => Ok(SensorValue::Unavailable),
+            state => state
+                .parse::<f64>()
+                .map(SensorValue::Value)
+                .map_err(|error| Error::InvalidState {
+                    entity_id: entity_id.clone(),
+                    reason: format!("expected numeric state, got `{}`: {error}", raw.state),
+                }),
+        }
     }
 }
 
@@ -304,6 +321,11 @@ typed_readable_entity!(BinarySensor, BinaryState, BinaryStateDecoder);
 typed_readable_entity!(Light, BinaryState, BinaryStateDecoder);
 typed_readable_entity!(Switch, BinaryState, BinaryStateDecoder);
 typed_readable_entity!(Sensor<f64>, f64, F64StateDecoder);
+typed_readable_entity!(
+    Sensor<SensorValue<f64>>,
+    SensorValue<f64>,
+    SensorValueF64Decoder
+);
 typed_readable_entity!(Sensor<String>, String, StringStateDecoder);
 
 macro_rules! binary_state_entity {
@@ -385,6 +407,7 @@ macro_rules! sensor_state_entity {
 }
 
 sensor_state_entity!(f64);
+sensor_state_entity!(SensorValue<f64>);
 sensor_state_entity!(String);
 
 pub(crate) fn validate_entity_id(value: &str) -> Result<()> {

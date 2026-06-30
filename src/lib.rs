@@ -115,8 +115,8 @@ pub(crate) use rest::{
 pub use services::{LightTurnOff, LightTurnOn};
 pub(crate) use services::{service_entity, validate_domain_service};
 pub use state::{
-    Availability, BinaryState, DeleteStateResult, EntityState, SetStateResult, StateChangedEvent,
-    StateWrite,
+    Availability, BinaryState, DeleteStateResult, EntityState, SensorValue, SetStateResult,
+    StateChangedEvent, StateWrite,
 };
 pub use streams::{EventStreamError, RawEventStream, StateChangeStream};
 pub use timer::{TaskHandle, TimerHandle};

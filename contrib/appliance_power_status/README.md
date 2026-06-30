@@ -10,8 +10,8 @@ sensor:
   running;
 - `off` when power is below `off_below`, either immediately at startup/unknown
   or after `off_delay` while dropping from active power;
-- `unknown` when the power sensor is missing, empty, `unknown`, `unavailable`,
-  or non-numeric.
+- `unknown` when the power sensor is missing, empty, `unknown`, or
+  `unavailable`; malformed numeric states remain errors.
 
 The Rust sketch intentionally does not keep the original callback/timer shape.
 Instead, it uses a reclassifying loop:
@@ -84,11 +84,10 @@ cargo run --example appliance_power_status
 
 The conversion uses:
 
-- `Sensor::<f64>` for the source power entity;
+- `Sensor::<SensorValue<f64>>` for the availability-aware source power entity;
 - `EntityId` + `set_state_raw` for the derived status sensor;
 - `Context::state_changes` for the event stream;
-- cancellation-aware `tokio::select!` with `ctx.cancelled()` for held
-  thresholds.
+- typed sensor expectations with `.for_at_least(...)` for held thresholds.
 
 The important simplification is that there are no explicit idle/off timer
 handles. A pending delayed state is just a held predicate over the power stream.
@@ -102,11 +101,8 @@ current Home Assistant state.
 - `set_state_raw` mirrors `set_state(..., check_existence=False)` closely: it
   publishes state through Home Assistant's REST states API and does not create a
   persistent entity registry entry.
-- The current hauto `Sensor::<f64>` decoder treats non-numeric states as
-  errors. The AppDaemon automation treats them as `unknown`. This sketch uses
-  raw state strings for the power sensor so it can preserve that behavior.
+- `Sensor::<SensorValue<f64>>` maps `unknown`, `unavailable`, and empty power
+  states into typed availability values while keeping malformed numeric states
+  as errors.
 - There is no entity-level `next_change` helper yet, so the sketch uses
   `ctx.state_changes(power.entity_id())` directly.
-- There is no unknown-tolerant numeric sensor type yet, such as
-  `Sensor<Option<f64>>`. Adding one would let this example use typed waits and
-  expectations more directly.

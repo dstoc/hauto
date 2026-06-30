@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use appliance_power_status::{AppliancePowerStatus, AppliancePowerStatusConfig, StatusIcons};
-use hauto::{App, EntityId, Error as HautoError, Sensor};
+use hauto::{App, EntityId, Error as HautoError, Sensor, SensorValue};
 
 mod appliance_power_status;
 
@@ -16,7 +16,7 @@ async fn main() -> hauto::Result<()> {
     let home_assistant_token = required_env("HOME_ASSISTANT_TOKEN")?;
 
     let washing_machine = AppliancePowerStatusConfig {
-        power_entity: Sensor::<f64>::new("sensor.laundry_washing_machine_power")?,
+        power_entity: Sensor::<SensorValue<f64>>::new("sensor.laundry_washing_machine_power")?,
         status_entity: EntityId::new("sensor.washing_machine_status")?,
         friendly_name: "Washing Machine Status".to_string(),
         off_below: 3.0,
@@ -32,7 +32,7 @@ async fn main() -> hauto::Result<()> {
     };
 
     let dryer = AppliancePowerStatusConfig {
-        power_entity: Sensor::<f64>::new("sensor.laundry_dryer_power")?,
+        power_entity: Sensor::<SensorValue<f64>>::new("sensor.laundry_dryer_power")?,
         status_entity: EntityId::new("sensor.dryer_status")?,
         friendly_name: "Dryer Status".to_string(),
         off_below: 1.0,

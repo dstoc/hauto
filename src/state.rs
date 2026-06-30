@@ -33,6 +33,41 @@ impl BinaryState {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SensorValue<T> {
+    Value(T),
+    Unknown,
+    Unavailable,
+}
+
+impl<T> SensorValue<T> {
+    pub fn as_value(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Unknown | Self::Unavailable => None,
+        }
+    }
+
+    pub fn into_value(self) -> Option<T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Unknown | Self::Unavailable => None,
+        }
+    }
+
+    pub fn is_value(&self) -> bool {
+        matches!(self, Self::Value(_))
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityState {
     pub entity_id: EntityId,
     pub state: String,
