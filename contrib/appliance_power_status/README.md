@@ -1,106 +1,96 @@
-# Appliance power status conversion sketch
+# Appliance power status
 
-This sketches a hauto conversion of an AppDaemon appliance-power monitor. The
-original automation watches a power sensor and publishes a derived status
-sensor:
+This example derives a human-friendly appliance status from a numeric Home
+Assistant power sensor.
+
+It is useful for appliances such as washing machines and dryers where power
+draw is a better signal than a built-in status entity. The automation watches a
+source power sensor and publishes a derived status sensor with one of four
+states:
 
 - `running` when power is at or above `idle_below`;
-- `idle` when power is between `off_below` and `idle_below`, either
-  immediately from off/unknown or after `idle_delay` while dropping from
-  running;
-- `off` when power is below `off_below`, either immediately at startup/unknown
-  or after `off_delay` while dropping from active power;
+- `idle` when power stays below `idle_below` for `idle_delay`;
+- `off` when power stays below `off_below` for `off_delay`;
 - `unknown` when the power sensor is missing, empty, `unknown`, or
-  `unavailable`; malformed numeric states remain errors.
+  `unavailable`.
 
-The Rust sketch intentionally does not keep the original callback/timer shape.
-Instead, it uses a reclassifying loop:
+Malformed numeric power states are treated as errors. This keeps integration or
+template mistakes visible instead of silently mapping them to `unknown`.
 
-1. read the current power;
-2. publish immediate states (`unknown` and `running`);
-3. require candidate delayed states (`idle` and `off`) to hold for their delay;
-4. after each change, interruption, or published status, loop back and classify
-   the current power again.
+## Status model
 
-That shape handles appliance cycles such as `off -> running -> idle -> running`
-without treating the status flow as one-way.
+The automation is threshold based:
 
-## AppDaemon config shape
-
-```yaml
-washing_machine_status:
-  module: appliance_power_status
-  class: AppliancePowerStatus
-
-  power_entity: sensor.laundry_washing_machine_power
-  status_entity: sensor.washing_machine_status
-  friendly_name: Washing Machine Status
-
-  off_below: 3
-  idle_below: 10
-  off_delay: 300
-  idle_delay: 30
-
-  icons:
-    off: mdi:washing-machine-off
-    idle: mdi:pause-circle
-    running: mdi:washing-machine
-    unknown: mdi:help-circle
-
-dryer_status:
-  module: appliance_power_status
-  class: AppliancePowerStatus
-
-  power_entity: sensor.laundry_dryer_power
-  status_entity: sensor.dryer_status
-  friendly_name: Dryer Status
-
-  off_below: 1
-  idle_below: 10
-  off_delay: 300
-  idle_delay: 30
-
-  icons:
-    off: mdi:tumble-dryer-off
-    idle: mdi:pause-circle
-    running: mdi:tumble-dryer
-    unknown: mdi:help-circle
+```text
+power >= idle_below              => running
+off_below <= power < idle_below  => candidate idle
+power < off_below                => candidate off
+missing/unknown/unavailable      => unknown
 ```
 
-## hauto shape
+`idle` and `off` are delayed states. The power reading must remain below the
+relevant threshold for the configured delay before the status is published. If
+power rises above the threshold during the delay, the pending status is
+interrupted and the automation reclassifies from the current power state.
 
-The reusable automation logic is in
-[`appliance_power_status.rs`](appliance_power_status.rs). That file is intended
-to be easy to copy into another hauto project.
+That shape handles normal appliance cycles such as:
 
-The runnable bootstrap is in [`main.rs`](main.rs). It constructs the washing
-machine and dryer configs, registers them with `App`, and reads the Home
-Assistant URL/token from the environment. It can be compile-checked and run as
-a Cargo example:
+```text
+off -> running -> idle -> running -> idle -> off
+```
+
+## Configuration
+
+Each appliance is configured with an `AppliancePowerStatusConfig` value:
+
+- `power_entity`: source `Sensor<SensorValue<f64>>` power sensor;
+- `status_entity`: derived status entity to publish;
+- `friendly_name`: friendly name for the derived status entity;
+- `off_below`: power threshold below which the appliance is considered off;
+- `idle_below`: power threshold below which the appliance may be idle;
+- `off_delay`: how long power must stay below `off_below` before publishing
+  `off`;
+- `idle_delay`: how long power must stay below `idle_below` before publishing
+  `idle`;
+- `icons`: Material Design Icons to publish with each derived status.
+
+The runnable example in [`main.rs`](main.rs) defines two appliances:
+
+- `sensor.laundry_washing_machine_power` -> `sensor.washing_machine_status`
+- `sensor.laundry_dryer_power` -> `sensor.dryer_status`
+
+Adjust those entity ids and thresholds for your own Home Assistant setup.
+
+## Running the example
+
+The example reads Home Assistant connection details from environment variables:
 
 ```sh
+export HOME_ASSISTANT_URL='http://homeassistant.local:8123'
+export HOME_ASSISTANT_TOKEN='...'
 cargo run --example appliance_power_status
 ```
 
-The conversion uses:
+The reusable automation logic lives in
+[`appliance_power_status.rs`](appliance_power_status.rs). Copy that file into
+another hauto project if you want to construct appliance configs from your own
+application bootstrap code.
 
-- `Sensor::<SensorValue<f64>>` for the availability-aware source power entity;
-- `EntityId` + `set_state_raw` for the derived status sensor;
-- typed `next_change` waits for reclassifying after a published status;
-- typed sensor expectations with `.for_at_least(...)` for held thresholds.
+## Implementation notes
 
-The important simplification is that there are no explicit idle/off timer
-handles. A pending delayed state is just a held predicate over the power stream.
-If the predicate is interrupted, the automation loops and reclassifies from the
-current Home Assistant state.
+The automation uses hauto primitives directly:
 
-## Open migration questions
+- `Sensor::<SensorValue<f64>>` decodes numeric power readings while representing
+  `unknown`, `unavailable`, and empty states as typed availability values.
+- `get(&ctx)` reads and decodes the current power state.
+- `expect_matching(...).for_at_least(...)` implements delayed `idle` and `off`
+  holds.
+- `next_change(&ctx)` waits for the next source power change before
+  reclassifying after a published status.
+- `set_state_raw` publishes the derived status entity through Home Assistant's
+  REST states API.
 
-- hauto has no config loader yet. This sketch constructs the two appliance
-  definitions in Rust instead of reading `apps.yaml`.
-- `set_state_raw` mirrors `set_state(..., check_existence=False)` closely: it
-  publishes state through Home Assistant's REST states API and does not create a
-  persistent entity registry entry.
-- `Sensor::<SensorValue<f64>>` maps `unknown`, `unavailable`, and empty power
-  states into typed availability values while keeping malformed numeric states
-  as errors.
+The derived status entity is a Home Assistant state-machine entry, not a
+persistent entity registry entry. If you want a persistent entity registry
+entity, expose the status through a Home Assistant integration or helper
+instead of publishing it only through the states API.
