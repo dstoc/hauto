@@ -21,6 +21,8 @@ mod streams;
 mod tests;
 mod timer;
 mod wait;
+#[allow(dead_code)]
+mod ws;
 
 pub use app::{App, Automation};
 pub use client::HomeAssistantClient;
@@ -44,6 +46,7 @@ pub(crate) use timer::{TimerCompletionGuard, TimerControl, wait_cancelled};
 pub use wait::{
     HoldResult, StateExpectation, StateWait, TimedStateWait, TimeoutResult, WaitResult,
 };
+pub(crate) use ws::WsTransport;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;

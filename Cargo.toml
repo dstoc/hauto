@@ -5,10 +5,12 @@ edition = "2024"
 
 [dependencies]
 futures-core = "0.3.32"
+futures-util = "0.3.32"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt", "time", "sync", "macros"] }
+tokio = { version = "1.52.3", features = ["rt", "time", "sync", "macros", "net"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 url = "2.5.8"

@@ -13,14 +13,15 @@ use tokio::sync::{broadcast, watch};
 use crate::{
     DeleteStateResult, EntityId, EntityState, Error, RawEventStream, RestStateRequest,
     RestStateTransport, Result, SetStateResult, StateChangeStream, StateChangedEvent, StateWrite,
-    map_delete_state_response, map_set_state_response, rest::ReqwestRestStateTransport,
-    service_entity, validate_domain_service,
+    WsTransport, map_delete_state_response, map_set_state_response,
+    rest::ReqwestRestStateTransport, service_entity, validate_domain_service,
 };
 
 #[derive(Clone)]
 pub struct HomeAssistantClient {
     pub(crate) generation: Arc<GenerationState>,
     rest_states: Option<Arc<dyn RestStateTransport>>,
+    ws: Option<Arc<WsTransport>>,
 }
 
 impl fmt::Debug for HomeAssistantClient {
@@ -28,6 +29,7 @@ impl fmt::Debug for HomeAssistantClient {
         f.debug_struct("HomeAssistantClient")
             .field("generation", &self.generation)
             .field("has_rest_states_transport", &self.rest_states.is_some())
+            .field("has_ws_transport", &self.ws.is_some())
             .finish()
     }
 }
@@ -43,6 +45,7 @@ impl HomeAssistantClient {
         Self {
             generation: Arc::new(GenerationState::new([])),
             rest_states: None,
+            ws: None,
         }
     }
 
@@ -56,6 +59,7 @@ impl HomeAssistantClient {
                 rest_base_url,
                 access_token,
             )?)),
+            ws: None,
         })
     }
 
@@ -64,6 +68,7 @@ impl HomeAssistantClient {
         Self {
             generation: Arc::new(GenerationState::new(states)),
             rest_states: None,
+            ws: None,
         }
     }
 
@@ -72,7 +77,22 @@ impl HomeAssistantClient {
         Self {
             generation: Arc::new(GenerationState::new([])),
             rest_states: Some(Arc::new(transport)),
+            ws: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn connect_websocket_generation(
+        websocket_url: impl AsRef<str>,
+        access_token: impl Into<String>,
+    ) -> Result<Self> {
+        let generation = Arc::new(GenerationState::new([]));
+        let ws = WsTransport::connect(websocket_url, access_token, generation.clone()).await?;
+        Ok(Self {
+            generation,
+            rest_states: None,
+            ws: Some(ws),
+        })
     }
 
     #[cfg(test)]
@@ -97,13 +117,17 @@ impl HomeAssistantClient {
         &self,
         domain: &str,
         service: &str,
-        _data: Value,
+        data: Value,
     ) -> Result<Value> {
         self.ensure_generation_active()?;
         validate_domain_service(domain, service)?;
-        Err(Error::NotImplemented(
-            "HomeAssistantClient::call_service_raw",
-        ))
+        let Some(transport) = &self.ws else {
+            return Err(Error::NotImplemented(
+                "HomeAssistantClient::call_service_raw",
+            ));
+        };
+
+        transport.call_service_raw(domain, service, data).await
     }
 
     pub async fn command_raw(&self, command: Value) -> Result<Value> {
@@ -129,7 +153,10 @@ impl HomeAssistantClient {
                 ));
             }
         }
-        Err(Error::NotImplemented("HomeAssistantClient::command_raw"))
+        let Some(transport) = &self.ws else {
+            return Err(Error::NotImplemented("HomeAssistantClient::command_raw"));
+        };
+        transport.command_raw(command).await
     }
 
     pub async fn set_state_raw(
@@ -188,7 +215,15 @@ impl HomeAssistantClient {
 
     pub async fn subscribe_events_raw(&self, _event_type: Option<&str>) -> Result<RawEventStream> {
         self.ensure_generation_active()?;
-        Ok(RawEventStream::placeholder())
+        let Some(transport) = &self.ws else {
+            return Ok(RawEventStream::placeholder());
+        };
+        let event_type = _event_type.map(str::to_string);
+        transport.subscribe_events(event_type.as_deref()).await?;
+        Ok(RawEventStream::new(
+            self.generation.raw_events.subscribe(),
+            event_type,
+        ))
     }
 
     pub async fn turn_on(&self, entity_id: &EntityId) -> Result<Value> {
@@ -213,6 +248,29 @@ impl HomeAssistantClient {
             Ok(())
         }
     }
+
+    #[allow(dead_code)]
+    pub(crate) async fn refresh_states_from_websocket(&self) -> Result<Vec<EntityState>> {
+        self.ensure_generation_active()?;
+        let Some(transport) = &self.ws else {
+            return Err(Error::NotImplemented(
+                "HomeAssistantClient::refresh_states_from_websocket",
+            ));
+        };
+        let value = transport.get_states().await?;
+        let states: Vec<EntityState> = serde_json::from_value(value).map_err(|error| {
+            Error::Connection(format!("get_states response could not be decoded: {error}"))
+        })?;
+        for state in &states {
+            self.generation.cache_state(state.clone());
+        }
+        Ok(states)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn subscribe_state_changed_events(&self) -> Result<RawEventStream> {
+        self.subscribe_events_raw(Some("state_changed")).await
+    }
 }
 
 pub(crate) static NEXT_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -224,12 +282,14 @@ pub(crate) struct GenerationState {
     cancelled: watch::Sender<bool>,
     state_cache: Mutex<HashMap<EntityId, EntityState>>,
     pub(crate) state_changes: broadcast::Sender<StateChangedEvent>,
+    pub(crate) raw_events: broadcast::Sender<Value>,
 }
 
 impl GenerationState {
     fn new(states: impl IntoIterator<Item = EntityState>) -> Self {
         let (cancelled, _receiver) = watch::channel(false);
         let (state_changes, _receiver) = broadcast::channel(64);
+        let (raw_events, _receiver) = broadcast::channel(64);
         Self {
             id: NEXT_GENERATION_ID.fetch_add(1, Ordering::Relaxed),
             is_cancelled: AtomicBool::new(false),
@@ -241,6 +301,7 @@ impl GenerationState {
                     .collect(),
             ),
             state_changes,
+            raw_events,
         }
     }
 
@@ -262,8 +323,8 @@ impl GenerationState {
             .cloned()
     }
 
-    #[cfg(test)]
-    fn cache_state(&self, state: EntityState) {
+    #[allow(dead_code)]
+    pub(crate) fn cache_state(&self, state: EntityState) {
         let old_state = self
             .state_cache
             .lock()
@@ -276,8 +337,8 @@ impl GenerationState {
         });
     }
 
-    #[cfg(test)]
-    fn remove_cached_state(&self, entity_id: &EntityId) -> Option<EntityState> {
+    #[allow(dead_code)]
+    pub(crate) fn remove_cached_state(&self, entity_id: &EntityId) -> Option<EntityState> {
         let old_state = self
             .state_cache
             .lock()
@@ -289,5 +350,21 @@ impl GenerationState {
             new_state: None,
         });
         old_state
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn apply_state_changed_event(&self, event: StateChangedEvent) {
+        {
+            let mut cache = self.state_cache.lock().expect("state cache lock poisoned");
+            match &event.new_state {
+                Some(state) => {
+                    cache.insert(event.entity_id.clone(), state.clone());
+                }
+                None => {
+                    cache.remove(&event.entity_id);
+                }
+            }
+        }
+        let _ = self.state_changes.send(event);
     }
 }
