@@ -17,4 +17,4 @@ url = "2.5.8"
 
 [[example]]
 name = "appliance_power_status"
-path = "contrib/appliance_power_status/main.rs"
+path = "examples/appliance_power_status/main.rs"

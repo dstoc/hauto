@@ -18,7 +18,7 @@ useful for Home Assistant sensors that can temporarily report `unknown` or
 `unavailable`.
 
 The concrete pressure point is
-`contrib/appliance_power_status/appliance_power_status.rs`. The appliance
+`examples/appliance_power_status/appliance_power_status.rs`. The appliance
 status automation wants this behavior:
 
 * numeric power values are normal readings;
@@ -191,7 +191,7 @@ continue unchanged.
 ### First caller
 
 After implementation, simplify
-`contrib/appliance_power_status/appliance_power_status.rs` to use
+`examples/appliance_power_status/appliance_power_status.rs` to use
 `Sensor<SensorValue<f64>>` and the existing expectation builder instead of its
 local raw-state hold helper.
 
