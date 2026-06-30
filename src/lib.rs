@@ -9,6 +9,7 @@
 use std::{future::Future, pin::Pin};
 
 mod app;
+mod cache;
 mod client;
 mod context;
 mod entity;
@@ -25,6 +26,7 @@ mod wait;
 mod ws;
 
 pub use app::{App, Automation};
+pub use cache::StateCache;
 pub use client::HomeAssistantClient;
 pub use context::Context;
 pub use entity::{BinarySensor, EntityId, Light, Sensor, Switch};

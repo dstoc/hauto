@@ -1,0 +1,21 @@
+use crate::{EntityId, EntityState, client::GenerationState};
+
+/// Read-only access to a Home Assistant state cache snapshot.
+///
+/// `StateCache` is intentionally a thin wrapper around the crate's internal
+/// generation cache. It lets typed entity handles synchronously decode cached
+/// state without exposing mutation APIs.
+pub struct StateCache<'a> {
+    pub(crate) generation: &'a GenerationState,
+}
+
+impl<'a> StateCache<'a> {
+    #[allow(dead_code)]
+    pub(crate) fn new(generation: &'a GenerationState) -> Self {
+        Self { generation }
+    }
+
+    pub(crate) fn raw_state(&self, entity_id: &EntityId) -> Option<EntityState> {
+        self.generation.cached_state(entity_id)
+    }
+}

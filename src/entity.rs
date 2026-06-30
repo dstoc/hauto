@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    BinaryState, Context, EntityState, Error, LightTurnOff, LightTurnOn, Result, StateExpectation,
-    StateWait, service_entity,
+    BinaryState, Context, EntityState, Error, LightTurnOff, LightTurnOn, Result, StateCache,
+    StateExpectation, StateWait, service_entity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -265,7 +265,22 @@ impl TypedStateEntity for Sensor<String> {
     }
 }
 
+fn read_typed_state<E>(entity: &E, cache: &StateCache<'_>) -> Result<Option<E::State>>
+where
+    E: TypedStateEntity,
+{
+    let entity_id = entity.entity_id();
+    cache
+        .raw_state(entity_id)
+        .map(|raw| E::decode_state(entity_id, &raw))
+        .transpose()
+}
+
 impl BinarySensor {
+    pub fn read(&self, cache: &StateCache<'_>) -> Result<Option<BinaryState>> {
+        read_typed_state(self, cache)
+    }
+
     pub fn wait_until<'a>(&'a self, ctx: &'a Context, target: BinaryState) -> StateWait<'a> {
         StateWait::new(
             ctx,
@@ -308,6 +323,10 @@ impl BinarySensor {
 macro_rules! binary_state_waits {
     ($ty:ty) => {
         impl $ty {
+            pub fn read(&self, cache: &StateCache<'_>) -> Result<Option<BinaryState>> {
+                read_typed_state(self, cache)
+            }
+
             pub fn wait_until<'a>(
                 &'a self,
                 ctx: &'a Context,
@@ -357,6 +376,10 @@ binary_state_waits!(Light);
 binary_state_waits!(Switch);
 
 impl Sensor<f64> {
+    pub fn read(&self, cache: &StateCache<'_>) -> Result<Option<f64>> {
+        read_typed_state(self, cache)
+    }
+
     pub fn wait_until_matching<'a, F>(
         &'a self,
         ctx: &'a Context,
@@ -391,6 +414,10 @@ impl Sensor<f64> {
 }
 
 impl Sensor<String> {
+    pub fn read(&self, cache: &StateCache<'_>) -> Result<Option<String>> {
+        read_typed_state(self, cache)
+    }
+
     pub fn wait_until_matching<'a, F>(
         &'a self,
         ctx: &'a Context,
