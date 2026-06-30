@@ -4,10 +4,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    BinaryState, Context, EntityId, EntityState, Error, Result, StateChangeStream,
-    StateChangedEvent,
-};
+use crate::{BinaryState, Context, EntityId, Error, Result, StateChangeStream, StateChangedEvent};
 
 #[derive(Clone, Debug)]
 pub struct StateWait<'a> {
@@ -140,18 +137,10 @@ pub enum TimeoutResult<T> {
 async fn run_state_wait(wait: StateWait<'_>) -> Result<()> {
     wait.ctx.home_assistant.ensure_generation_active()?;
     let mut changes = wait.ctx.state_changes(&wait.entity_id);
-    let initial = wait
-        .ctx
-        .home_assistant
-        .generation
-        .cached_state(&wait.entity_id);
-    let mut ready_for_target = !wait.require_transition
-        || initial
-            .as_ref()
-            .and_then(|state| BinaryState::decode(&state.state).ok())
-            != Some(wait.target);
+    let initial = current_binary_state(wait.ctx, &wait.entity_id)?;
+    let mut ready_for_target = !wait.require_transition || initial != Some(wait.target);
 
-    if !wait.require_transition && is_binary_state(initial.as_ref(), wait.target)? {
+    if !wait.require_transition && initial == Some(wait.target) {
         if hold_target_for(
             wait.ctx,
             &mut changes,
@@ -168,29 +157,22 @@ async fn run_state_wait(wait: StateWait<'_>) -> Result<()> {
 
     loop {
         let event = next_state_change(wait.ctx, &mut changes).await?;
-        match event.new_state.as_ref() {
-            Some(new_state) => {
-                let state = BinaryState::decode(&new_state.state)?;
-                if state == wait.target {
-                    if ready_for_target
-                        && hold_target_for(
-                            wait.ctx,
-                            &mut changes,
-                            &wait.entity_id,
-                            wait.target,
-                            wait.hold_for,
-                        )
-                        .await?
-                    {
-                        return Ok(());
-                    }
-                } else {
-                    ready_for_target = true;
-                }
+        let state = event_binary_state(&event, &wait.entity_id)?;
+        if state == wait.target {
+            if ready_for_target
+                && hold_target_for(
+                    wait.ctx,
+                    &mut changes,
+                    &wait.entity_id,
+                    wait.target,
+                    wait.hold_for,
+                )
+                .await?
+            {
+                return Ok(());
             }
-            None => {
-                return Err(Error::EntityNotFound(wait.entity_id.clone()));
-            }
+        } else {
+            ready_for_target = true;
         }
     }
 }
@@ -200,13 +182,8 @@ async fn run_state_expectation(
 ) -> Result<HoldResult<BinaryState>> {
     expectation.ctx.home_assistant.ensure_generation_active()?;
     let mut changes = expectation.ctx.state_changes(&expectation.entity_id);
-    let current = expectation
-        .ctx
-        .home_assistant
-        .generation
-        .cached_state(&expectation.entity_id)
+    let actual = current_binary_state(expectation.ctx, &expectation.entity_id)?
         .ok_or_else(|| Error::EntityNotFound(expectation.entity_id.clone()))?;
-    let actual = BinaryState::decode(&current.state)?;
     if actual != expectation.target {
         return Ok(HoldResult::NotSatisfied { actual });
     }
@@ -226,25 +203,30 @@ async fn run_state_expectation(
             () = &mut deadline => return Ok(HoldResult::Held),
             event = next_state_change(expectation.ctx, &mut changes) => {
                 let event = event?;
-                match event.new_state.as_ref() {
-                    Some(new_state) => {
-                        let actual = BinaryState::decode(&new_state.state)?;
-                        if actual != expectation.target {
-                            return Ok(HoldResult::Interrupted { actual });
-                        }
-                    }
-                    None => return Err(Error::EntityNotFound(expectation.entity_id.clone())),
+                let actual = event_binary_state(&event, &expectation.entity_id)?;
+                if actual != expectation.target {
+                    return Ok(HoldResult::Interrupted { actual });
                 }
             }
         }
     }
 }
 
-pub(crate) fn is_binary_state(state: Option<&EntityState>, target: BinaryState) -> Result<bool> {
-    state
-        .map(|state| BinaryState::decode(&state.state).map(|actual| actual == target))
+fn current_binary_state(ctx: &Context, entity_id: &EntityId) -> Result<Option<BinaryState>> {
+    ctx.home_assistant
+        .generation
+        .cached_state(entity_id)
+        .as_ref()
+        .map(|state| BinaryState::decode(&state.state))
         .transpose()
-        .map(|value| value.unwrap_or(false))
+}
+
+fn event_binary_state(event: &StateChangedEvent, entity_id: &EntityId) -> Result<BinaryState> {
+    event
+        .new_state
+        .as_ref()
+        .ok_or_else(|| Error::EntityNotFound(entity_id.clone()))
+        .and_then(|state| BinaryState::decode(&state.state))
 }
 
 pub(crate) async fn hold_target_for(
@@ -268,16 +250,9 @@ pub(crate) async fn hold_target_for(
             () = &mut deadline => return Ok(true),
             event = next_state_change(ctx, changes) => {
                 let event = event?;
-                match event.new_state.as_ref() {
-                    Some(new_state) => {
-                        let actual = BinaryState::decode(&new_state.state)?;
-                        if actual != target {
-                            return Ok(false);
-                        }
-                    }
-                    None => {
-                        return Err(Error::EntityNotFound(entity_id.clone()));
-                    }
+                let actual = event_binary_state(&event, entity_id)?;
+                if actual != target {
+                    return Ok(false);
                 }
             }
         }
