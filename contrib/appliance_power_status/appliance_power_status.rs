@@ -70,7 +70,13 @@ impl AppliancePowerStatus {
 
     pub async fn run(self, ctx: Context) -> hauto::Result<()> {
         loop {
-            let Some(power) = read_power(&ctx, &self.config.power_entity).await? else {
+            let power = match self.config.power_entity.get(&ctx).await {
+                Ok(value) => value.into_value(),
+                Err(HautoError::EntityNotFound(_)) => None,
+                Err(error) => return Err(error),
+            };
+
+            let Some(power) = power else {
                 set_status(&ctx, &self.config, ApplianceStatus::Unknown).await?;
                 wait_for_reclassification(&ctx, &self.config.power_entity).await?;
                 continue;
@@ -109,17 +115,6 @@ impl AppliancePowerStatus {
                 wait_for_reclassification(&ctx, &self.config.power_entity).await?;
             }
         }
-    }
-}
-
-async fn read_power(
-    ctx: &Context,
-    power_entity: &Sensor<SensorValue<f64>>,
-) -> hauto::Result<Option<f64>> {
-    match power_entity.get(ctx).await {
-        Ok(value) => Ok(value.into_value()),
-        Err(HautoError::EntityNotFound(_)) => Ok(None),
-        Err(error) => Err(error),
     }
 }
 
