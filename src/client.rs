@@ -8,13 +8,16 @@ use std::{
 };
 
 use serde_json::Value;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{OnceCell, broadcast, watch};
 
 use crate::{
-    DeleteStateResult, EntityId, EntityState, Error, RawEventStream, RestStateRequest,
+    AreaId, DeleteStateResult, EntityId, EntityState, Error, RawEventStream, RestStateRequest,
     RestStateTransport, Result, SetStateResult, StateChangeStream, StateChangedEvent, StateWrite,
-    WsTransport, map_delete_state_response, map_set_state_response,
-    rest::ReqwestRestStateTransport, service_entity, validate_domain_service,
+    WsTransport,
+    discovery::{AreaMembership, CatalogSnapshot},
+    map_delete_state_response, map_set_state_response,
+    rest::ReqwestRestStateTransport,
+    service_entity, validate_domain_service,
 };
 
 #[derive(Clone)]
@@ -288,6 +291,59 @@ impl HomeAssistantClient {
     pub(crate) async fn subscribe_state_changed_events(&self) -> Result<RawEventStream> {
         self.subscribe_events_raw(Some("state_changed")).await
     }
+
+    pub(crate) async fn discovery_catalog(&self) -> Result<Arc<CatalogSnapshot>> {
+        self.ensure_generation_active()?;
+        let snapshot = self
+            .generation
+            .discovery_catalog
+            .get_or_try_init(|| async {
+                self.ensure_generation_active()?;
+                let Some(transport) = &self.ws else {
+                    return Err(Error::NotImplemented("HomeAssistantClient::entity_catalog"));
+                };
+                let (areas, entities) = tokio::try_join!(
+                    transport.list_areas(),
+                    transport.list_entities_for_display()
+                )?;
+                self.ensure_generation_active()?;
+                Ok(Arc::new(CatalogSnapshot::from_responses(
+                    areas,
+                    entities,
+                    &self.generation,
+                )?))
+            })
+            .await?;
+        self.ensure_generation_active()?;
+        Ok(snapshot.clone())
+    }
+
+    pub(crate) async fn discovery_entities_in(
+        &self,
+        area_id: &AreaId,
+    ) -> Result<Arc<AreaMembership>> {
+        self.ensure_generation_active()?;
+        let cell = {
+            let mut memberships = self.generation.area_memberships.lock().await;
+            memberships
+                .entry(area_id.clone())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
+        let membership = cell
+            .get_or_try_init(|| async {
+                self.ensure_generation_active()?;
+                let Some(transport) = &self.ws else {
+                    return Err(Error::NotImplemented("HomeAssistantClient::entities_in"));
+                };
+                let response = transport.extract_area(area_id).await?;
+                self.ensure_generation_active()?;
+                Ok(Arc::new(response.referenced_entities.into_iter().collect()))
+            })
+            .await?;
+        self.ensure_generation_active()?;
+        Ok(membership.clone())
+    }
 }
 
 pub(crate) static NEXT_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -298,6 +354,8 @@ pub(crate) struct GenerationState {
     is_cancelled: AtomicBool,
     cancelled: watch::Sender<bool>,
     state_cache: Mutex<HashMap<EntityId, EntityState>>,
+    discovery_catalog: OnceCell<Arc<CatalogSnapshot>>,
+    area_memberships: tokio::sync::Mutex<HashMap<AreaId, Arc<OnceCell<Arc<AreaMembership>>>>>,
     pub(crate) state_changes: broadcast::Sender<StateChangedEvent>,
     pub(crate) raw_events: broadcast::Sender<Value>,
 }
@@ -317,6 +375,8 @@ impl GenerationState {
                     .map(|state| (state.entity_id.clone(), state))
                     .collect(),
             ),
+            discovery_catalog: OnceCell::new(),
+            area_memberships: tokio::sync::Mutex::new(HashMap::new()),
             state_changes,
             raw_events,
         }

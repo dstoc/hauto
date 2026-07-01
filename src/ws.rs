@@ -7,6 +7,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use tokio::{net::TcpStream, sync::oneshot};
 use tokio_tungstenite::{
@@ -15,7 +16,11 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-use crate::{EntityState, Error, Result, StateChangedEvent, client::GenerationState};
+use crate::{
+    AreaId, EntityState, Error, Result, StateChangedEvent,
+    client::GenerationState,
+    discovery::{AreaRegistryEntry, EntityRegistryDisplayResponse, ExtractTargetResponse},
+};
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type ClientWriter = SplitSink<ClientSocket, Message>;
@@ -212,6 +217,47 @@ impl WsTransport {
             );
         }
         self.command_raw(Value::Object(command)).await
+    }
+
+    pub(crate) async fn list_areas(&self) -> Result<Vec<AreaRegistryEntry>> {
+        self.typed_command(
+            json!({ "type": "config/area_registry/list" }),
+            "config/area_registry/list",
+        )
+        .await
+    }
+
+    pub(crate) async fn list_entities_for_display(&self) -> Result<EntityRegistryDisplayResponse> {
+        self.typed_command(
+            json!({ "type": "config/entity_registry/list_for_display" }),
+            "config/entity_registry/list_for_display",
+        )
+        .await
+    }
+
+    pub(crate) async fn extract_area(&self, area_id: &AreaId) -> Result<ExtractTargetResponse> {
+        self.typed_command(
+            json!({
+                "type": "extract_from_target",
+                "target": {
+                    "area_id": [area_id.as_str()],
+                },
+            }),
+            "extract_from_target",
+        )
+        .await
+    }
+
+    async fn typed_command<T>(&self, command: Value, command_type: &str) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let value = self.command_raw(command).await?;
+        serde_json::from_value(value).map_err(|error| {
+            Error::Connection(format!(
+                "{command_type} response could not be decoded: {error}"
+            ))
+        })
     }
 
     fn fail_pending(&self, failure: WsRequestFailure) {

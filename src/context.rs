@@ -1,9 +1,9 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use crate::{
-    BinarySensor, EntityId, Error, GlobalStateWait, HomeAssistantClient, Light, Result, StateCache,
-    StateChangeStream, TaskHandle, TimeoutResult, TimerCompletionGuard, TimerControl, TimerHandle,
-    wait_cancelled,
+    BinarySensor, EntityCatalog, EntityId, Error, GlobalStateWait, HomeAssistantClient, Light,
+    Result, StateCache, StateChangeStream, TaskHandle, TimeoutResult, TimerCompletionGuard,
+    TimerControl, TimerHandle, wait_cancelled,
 };
 
 #[derive(Clone, Debug)]
@@ -65,6 +65,10 @@ impl Context {
 
     pub fn home_assistant(&self) -> HomeAssistantClient {
         self.home_assistant.clone()
+    }
+
+    pub async fn entity_catalog(&self) -> Result<EntityCatalog> {
+        EntityCatalog::load(self.home_assistant.clone()).await
     }
 
     pub fn cancelled(&self) -> impl Future<Output = ()> + Send + 'static {

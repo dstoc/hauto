@@ -1,6 +1,6 @@
 use thiserror::Error as ThisError;
 
-use crate::{EntityId, EventStreamError};
+use crate::{AreaId, EntityId, EventStreamError};
 
 #[derive(Debug, ThisError)]
 pub enum Error {
@@ -10,6 +10,20 @@ pub enum Error {
     Authentication(String),
     #[error("entity not found: {0}")]
     EntityNotFound(EntityId),
+    #[error("area not found: {name}")]
+    AreaNotFound { name: String },
+    #[error("area name `{name}` is ambiguous; candidates: {candidates:?}")]
+    AreaAmbiguous {
+        name: String,
+        candidates: Vec<AreaId>,
+    },
+    #[error("entity query found no matches: {query}")]
+    EntityQueryNotFound { query: String },
+    #[error("entity query is ambiguous ({query}); candidates: {candidates:?}")]
+    EntityQueryAmbiguous {
+        query: String,
+        candidates: Vec<EntityId>,
+    },
     #[error("invalid entity id `{value}`: {reason}")]
     InvalidEntityId { value: String, reason: String },
     #[error("invalid domain for `{entity_id}`: expected `{expected}`, got `{actual}`")]

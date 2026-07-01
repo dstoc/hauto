@@ -88,6 +88,7 @@ mod app;
 mod cache;
 mod client;
 mod context;
+mod discovery;
 mod entity;
 mod error;
 mod rest;
@@ -105,6 +106,7 @@ pub use app::{App, Automation};
 pub use cache::StateCache;
 pub use client::HomeAssistantClient;
 pub use context::Context;
+pub use discovery::{AreaId, AreaInfo, DiscoveredEntity, EntityCatalog, EntityQuery, EntitySet};
 pub use entity::{BinarySensor, EntityId, Light, Sensor, Switch};
 pub use error::Error;
 #[cfg(test)]
