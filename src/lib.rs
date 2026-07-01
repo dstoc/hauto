@@ -15,7 +15,7 @@
 //! ```no_run
 //! use std::time::Duration;
 //!
-//! use hauto::{App, BinarySensor, HoldResult, Light, LightTurnOff, LightTurnOn};
+//! use hauto::{App, BinarySensor, Light, LightTurnOff, LightTurnOn};
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> hauto::Result<()> {
@@ -32,15 +32,11 @@
 //!                     occupancy.wait_until_on(&ctx).await?;
 //!                     light.turn_on(&ctx, LightTurnOn::default()).await?;
 //!
-//!                     if matches!(
-//!                         occupancy
-//!                             .expect_off(&ctx)
-//!                             .for_at_least(Duration::from_secs(30))
-//!                             .await?,
-//!                         HoldResult::Held
-//!                     ) {
-//!                         light.turn_off(&ctx, LightTurnOff::default()).await?;
-//!                     }
+//!                     occupancy
+//!                         .wait_until_off(&ctx)
+//!                         .for_at_least(Duration::from_secs(30))
+//!                         .await?;
+//!                     light.turn_off(&ctx, LightTurnOff::default()).await?;
 //!                 }
 //!             }
 //!         })
