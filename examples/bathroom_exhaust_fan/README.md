@@ -5,8 +5,8 @@ small automations through Home Assistant state.
 
 It has three automations:
 
-1. bathroom 1 humidity status publisher
-2. bathroom 2 humidity status publisher
+1. first-bathroom humidity status publisher
+2. second-bathroom humidity status publisher
 3. shared fan controller
 
 The humidity automations publish derived status sensors:
@@ -154,8 +154,8 @@ metadata is missing or ambiguous:
 
 | Role | Optional override |
 | --- | --- |
-| Bathroom 1 inputs/status | `HAUTO_BATHROOM_1_TEMP`, `HAUTO_BATHROOM_1_HUMIDITY`, `HAUTO_BATHROOM_1_OCCUPANCY`, `HAUTO_BATHROOM_1_HUMIDITY_STATUS` |
-| Bathroom 2 inputs/status | `HAUTO_BATHROOM_2_TEMP`, `HAUTO_BATHROOM_2_HUMIDITY`, `HAUTO_BATHROOM_2_OCCUPANCY`, `HAUTO_BATHROOM_2_HUMIDITY_STATUS` |
+| First bathroom inputs/status | `HAUTO_BATHROOM_1_TEMP`, `HAUTO_BATHROOM_1_HUMIDITY`, `HAUTO_BATHROOM_1_OCCUPANCY`, `HAUTO_BATHROOM_1_HUMIDITY_STATUS` |
+| Second bathroom inputs/status | `HAUTO_BATHROOM_2_TEMP`, `HAUTO_BATHROOM_2_HUMIDITY`, `HAUTO_BATHROOM_2_OCCUPANCY`, `HAUTO_BATHROOM_2_HUMIDITY_STATUS` |
 | Ambient inputs | `HAUTO_AMBIENT_TEMP`, `HAUTO_AMBIENT_HUMIDITY` |
 | Exhaust fan | `HAUTO_EXHAUST_FAN` |
 

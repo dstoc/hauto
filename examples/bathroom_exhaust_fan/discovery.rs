@@ -56,7 +56,7 @@ impl BathroomSpec {
         self.occupancy.is_none() || self.humidity_status.is_none()
     }
 
-    fn display_name(&self) -> &str {
+    pub fn display_name(&self) -> &str {
         self.area_name.as_deref().unwrap_or(&self.name)
     }
 }
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn area_name_is_used_as_the_bathroom_display_name() {
         let bathroom = BathroomSpec::new(
-            "Bathroom 1",
+            "HAUTO_BATHROOM_1",
             Some("Main Bathroom".into()),
             None,
             None,

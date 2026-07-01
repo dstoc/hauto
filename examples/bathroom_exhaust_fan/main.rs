@@ -27,8 +27,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let bathrooms = [
-        bathroom_spec("Bathroom 1", "HAUTO_BATHROOM_1")?,
-        bathroom_spec("Bathroom 2", "HAUTO_BATHROOM_2")?,
+        bathroom_spec("HAUTO_BATHROOM_1")?,
+        bathroom_spec("HAUTO_BATHROOM_2")?,
     ];
     let ambient = AmbientSpec::new(
         optional_env("HAUTO_AMBIENT_AREA")?,
@@ -42,11 +42,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let bathroom_1 = bathrooms[0].clone();
     let bathroom_2 = bathrooms[1].clone();
+    let bathroom_1_automation_name = format!("{} humidity status", bathroom_1.display_name());
+    let bathroom_2_automation_name = format!("{} humidity status", bathroom_2.display_name());
     let bathroom_1_ambient = ambient.clone();
     let bathroom_2_ambient = ambient;
 
     App::new(home_assistant_url, home_assistant_token)
-        .automation_fn("bathroom 1 humidity status", move |ctx| {
+        .automation_fn(bathroom_1_automation_name, move |ctx| {
             let bathroom = bathroom_1.clone();
             let ambient = bathroom_1_ambient.clone();
             async move {
@@ -56,7 +58,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 HumidityStatus::new(config).run(ctx).await
             }
         })
-        .automation_fn("bathroom 2 humidity status", move |ctx| {
+        .automation_fn(bathroom_2_automation_name, move |ctx| {
             let bathroom = bathroom_2.clone();
             let ambient = bathroom_2_ambient.clone();
             async move {
@@ -101,10 +103,10 @@ fn optional_env(name: &'static str) -> Result<Option<String>, Box<dyn Error>> {
     }
 }
 
-fn bathroom_spec(name: &str, prefix: &str) -> Result<BathroomSpec, Box<dyn Error>> {
+fn bathroom_spec(prefix: &str) -> Result<BathroomSpec, Box<dyn Error>> {
     let area_variable = format!("{prefix}_AREA");
     BathroomSpec::new(
-        name,
+        prefix,
         optional_env_name(&area_variable)?,
         optional_env_name(&format!("{prefix}_TEMP"))?,
         optional_env_name(&format!("{prefix}_HUMIDITY"))?,
