@@ -126,27 +126,55 @@ weather condition from running the fan indefinitely.
 
 ## Entity configuration
 
-Required environment variables:
+The normal configuration uses Home Assistant areas and the fan's exact display
+name:
 
 ```sh
 export HOME_ASSISTANT_URL='http://homeassistant.local:8123'
 export HOME_ASSISTANT_TOKEN='...'
 
-export HAUTO_EXHAUST_FAN='switch.bathroom_exhaust_fan'
-
-export HAUTO_AMBIENT_TEMP='sensor.hall_temperature'
-export HAUTO_AMBIENT_HUMIDITY='sensor.hall_humidity'
-
-export HAUTO_BATHROOM_1_TEMP='sensor.main_bathroom_temperature'
-export HAUTO_BATHROOM_1_HUMIDITY='sensor.main_bathroom_humidity'
-export HAUTO_BATHROOM_1_OCCUPANCY='binary_sensor.main_bathroom_occupancy'
-export HAUTO_BATHROOM_1_HUMIDITY_STATUS='sensor.bathroom_1_excess_humidity'
-
-export HAUTO_BATHROOM_2_TEMP='sensor.ensuite_temperature'
-export HAUTO_BATHROOM_2_HUMIDITY='sensor.ensuite_humidity'
-export HAUTO_BATHROOM_2_OCCUPANCY='binary_sensor.ensuite_occupancy'
-export HAUTO_BATHROOM_2_HUMIDITY_STATUS='sensor.bathroom_2_excess_humidity'
+export HAUTO_BATHROOM_1_AREA='Main Bathroom'
+export HAUTO_BATHROOM_2_AREA='Ensuite'
+export HAUTO_AMBIENT_AREA='Hall'
+export HAUTO_EXHAUST_FAN_NAME='Bathroom Exhaust Fan'
 ```
+
+Each bathroom area must contain exactly one `sensor` with device class
+`temperature`, one `sensor` with device class `humidity`, and one
+`binary_sensor` with device class `occupancy` or `motion`. The ambient area
+must contain exactly one temperature and humidity sensor. `presence` is not
+treated as bathroom occupancy. The fan is found globally by the `switch`
+domain and an exact display-name match (ignoring surrounding whitespace and
+case).
+
+Discovery never picks the first candidate. No match or multiple matches stop
+that automation's generation startup with an error; ambiguity errors list all
+candidates. Use an entity-ID override for any role whose Home Assistant
+metadata is missing or ambiguous:
+
+| Role | Optional override |
+| --- | --- |
+| Bathroom 1 inputs/status | `HAUTO_BATHROOM_1_TEMP`, `HAUTO_BATHROOM_1_HUMIDITY`, `HAUTO_BATHROOM_1_OCCUPANCY`, `HAUTO_BATHROOM_1_HUMIDITY_STATUS` |
+| Bathroom 2 inputs/status | `HAUTO_BATHROOM_2_TEMP`, `HAUTO_BATHROOM_2_HUMIDITY`, `HAUTO_BATHROOM_2_OCCUPANCY`, `HAUTO_BATHROOM_2_HUMIDITY_STATUS` |
+| Ambient inputs | `HAUTO_AMBIENT_TEMP`, `HAUTO_AMBIENT_HUMIDITY` |
+| Exhaust fan | `HAUTO_EXHAUST_FAN` |
+
+An override bypasses discovery for that role. An area or fan-name setting is
+required only while a role needs it, so the previous fully explicit
+entity-ID-only configuration remains valid. Discovery is resolved after each
+connection; reconnecting reloads the catalog and reruns selection.
+
+Without a humidity-status override, the publisher and controller independently
+derive the same stable ID from Home Assistant's area ID:
+
+```text
+sensor.hauto_<area_id>_excess_humidity
+```
+
+These derived sensors are raw states created by hauto. They do not have entity
+registry entries, do not independently survive a Home Assistant restart, and
+cannot be assigned to a Home Assistant area. Assigning raw sensor state
+attributes does not create a real area assignment.
 
 Optional quiet-hour overrides:
 
@@ -166,4 +194,5 @@ Run with:
 cargo run --example bathroom_exhaust_fan
 ```
 
+Entity-ID overrides retain domain validation; for example,
 `HAUTO_EXHAUST_FAN` must identify a `switch.*` entity.

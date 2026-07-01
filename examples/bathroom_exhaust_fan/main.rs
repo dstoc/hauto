@@ -6,10 +6,12 @@
 
 use std::{env, error::Error};
 
-use fan_control::{FanBathroomConfig, FanControl, FanControlConfig, FanSettings, QuietHours};
-use hauto::{App, BinarySensor, EntityId, Sensor, SensorValue, Switch};
-use humidity_status::{HumiditySettings, HumidityStatus, HumidityStatusConfig};
+use discovery::{AmbientSpec, BathroomSpec, FanSpec, resolve_fan_config, resolve_humidity_config};
+use fan_control::{FanControl, FanSettings, QuietHours};
+use hauto::App;
+use humidity_status::{HumiditySettings, HumidityStatus};
 
+mod discovery;
 mod fan_control;
 mod humidity_status;
 
@@ -24,76 +26,62 @@ async fn main() -> Result<(), Box<dyn Error>> {
         utc_offset_minutes: optional_env_i32("HAUTO_LOCAL_UTC_OFFSET_MINUTES")?.unwrap_or(0),
     };
 
-    let bathroom_1_humidity_status =
-        EntityId::new(required_env("HAUTO_BATHROOM_1_HUMIDITY_STATUS")?)?;
-    let bathroom_2_humidity_status =
-        EntityId::new(required_env("HAUTO_BATHROOM_2_HUMIDITY_STATUS")?)?;
-    let ambient_temperature = Sensor::<SensorValue<f64>>::new(required_env("HAUTO_AMBIENT_TEMP")?)?;
-    let ambient_humidity =
-        Sensor::<SensorValue<f64>>::new(required_env("HAUTO_AMBIENT_HUMIDITY")?)?;
+    let bathrooms = [
+        bathroom_spec("Bathroom 1", "HAUTO_BATHROOM_1")?,
+        bathroom_spec("Bathroom 2", "HAUTO_BATHROOM_2")?,
+    ];
+    let ambient = AmbientSpec::new(
+        optional_env("HAUTO_AMBIENT_AREA")?,
+        optional_env("HAUTO_AMBIENT_TEMP")?,
+        optional_env("HAUTO_AMBIENT_HUMIDITY")?,
+    )?;
+    let fan = FanSpec::new(
+        optional_env("HAUTO_EXHAUST_FAN_NAME")?,
+        optional_env("HAUTO_EXHAUST_FAN")?,
+    )?;
 
-    let bathroom_1_temperature =
-        Sensor::<SensorValue<f64>>::new(required_env("HAUTO_BATHROOM_1_TEMP")?)?;
-    let bathroom_1_humidity =
-        Sensor::<SensorValue<f64>>::new(required_env("HAUTO_BATHROOM_1_HUMIDITY")?)?;
-    let bathroom_1_occupancy = BinarySensor::new(required_env("HAUTO_BATHROOM_1_OCCUPANCY")?)?;
-
-    let bathroom_2_temperature =
-        Sensor::<SensorValue<f64>>::new(required_env("HAUTO_BATHROOM_2_TEMP")?)?;
-    let bathroom_2_humidity =
-        Sensor::<SensorValue<f64>>::new(required_env("HAUTO_BATHROOM_2_HUMIDITY")?)?;
-    let bathroom_2_occupancy = BinarySensor::new(required_env("HAUTO_BATHROOM_2_OCCUPANCY")?)?;
-
-    let bathroom_1_humidity = HumidityStatusConfig {
-        name: "Bathroom 1".to_string(),
-        status_entity: bathroom_1_humidity_status.clone(),
-        bathroom_temperature: bathroom_1_temperature,
-        bathroom_humidity: bathroom_1_humidity,
-        ambient_temperature: ambient_temperature.clone(),
-        ambient_humidity: ambient_humidity.clone(),
-        settings: HumiditySettings::default(),
-    };
-    let bathroom_2_humidity = HumidityStatusConfig {
-        name: "Bathroom 2".to_string(),
-        status_entity: bathroom_2_humidity_status.clone(),
-        bathroom_temperature: bathroom_2_temperature,
-        bathroom_humidity: bathroom_2_humidity,
-        ambient_temperature,
-        ambient_humidity,
-        settings: HumiditySettings::default(),
-    };
-    let fan_control = FanControlConfig {
-        fan: Switch::new(required_env("HAUTO_EXHAUST_FAN")?)?,
-        bathrooms: [
-            FanBathroomConfig {
-                name: "Bathroom 1".to_string(),
-                humidity_status: Sensor::<String>::new(bathroom_1_humidity_status.to_string())?,
-                occupancy: bathroom_1_occupancy,
-            },
-            FanBathroomConfig {
-                name: "Bathroom 2".to_string(),
-                humidity_status: Sensor::<String>::new(bathroom_2_humidity_status.to_string())?,
-                occupancy: bathroom_2_occupancy,
-            },
-        ],
-        settings: FanSettings {
-            quiet_hours,
-            ..FanSettings::default()
-        },
-    };
+    let bathroom_1 = bathrooms[0].clone();
+    let bathroom_2 = bathrooms[1].clone();
+    let bathroom_1_ambient = ambient.clone();
+    let bathroom_2_ambient = ambient;
 
     App::new(home_assistant_url, home_assistant_token)
         .automation_fn("bathroom 1 humidity status", move |ctx| {
-            let automation = HumidityStatus::new(bathroom_1_humidity.clone());
-            async move { automation.run(ctx).await }
+            let bathroom = bathroom_1.clone();
+            let ambient = bathroom_1_ambient.clone();
+            async move {
+                let config =
+                    resolve_humidity_config(&ctx, &bathroom, &ambient, HumiditySettings::default())
+                        .await?;
+                HumidityStatus::new(config).run(ctx).await
+            }
         })
         .automation_fn("bathroom 2 humidity status", move |ctx| {
-            let automation = HumidityStatus::new(bathroom_2_humidity.clone());
-            async move { automation.run(ctx).await }
+            let bathroom = bathroom_2.clone();
+            let ambient = bathroom_2_ambient.clone();
+            async move {
+                let config =
+                    resolve_humidity_config(&ctx, &bathroom, &ambient, HumiditySettings::default())
+                        .await?;
+                HumidityStatus::new(config).run(ctx).await
+            }
         })
         .automation_fn("bathroom exhaust fan control", move |ctx| {
-            let automation = FanControl::new(fan_control.clone());
-            async move { automation.run(ctx).await }
+            let bathrooms = bathrooms.clone();
+            let fan = fan.clone();
+            async move {
+                let config = resolve_fan_config(
+                    &ctx,
+                    &bathrooms,
+                    &fan,
+                    FanSettings {
+                        quiet_hours,
+                        ..FanSettings::default()
+                    },
+                )
+                .await?;
+                FanControl::new(config).run(ctx).await
+            }
         })
         .run()
         .await?;
@@ -103,6 +91,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 fn required_env(name: &'static str) -> Result<String, Box<dyn Error>> {
     env::var(name).map_err(|_| format!("missing required environment variable `{name}`").into())
+}
+
+fn optional_env(name: &'static str) -> Result<Option<String>, Box<dyn Error>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("invalid `{name}`: {error}").into()),
+    }
+}
+
+fn bathroom_spec(name: &str, prefix: &str) -> Result<BathroomSpec, Box<dyn Error>> {
+    let area_variable = format!("{prefix}_AREA");
+    BathroomSpec::new(
+        name,
+        optional_env_name(&area_variable)?,
+        optional_env_name(&format!("{prefix}_TEMP"))?,
+        optional_env_name(&format!("{prefix}_HUMIDITY"))?,
+        optional_env_name(&format!("{prefix}_OCCUPANCY"))?,
+        optional_env_name(&format!("{prefix}_HUMIDITY_STATUS"))?,
+        &area_variable,
+    )
+    .map_err(Into::into)
+}
+
+fn optional_env_name(name: &str) -> Result<Option<String>, Box<dyn Error>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("invalid `{name}`: {error}").into()),
+    }
 }
 
 fn optional_env_u32(name: &'static str) -> Result<Option<u32>, Box<dyn Error>> {
