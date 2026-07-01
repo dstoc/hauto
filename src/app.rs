@@ -8,6 +8,19 @@ use crate::{
     runtime::{BoxFuture, Context},
 };
 
+/// Configures and runs a set of automations against Home Assistant.
+///
+/// [`App::run`] operates in connection generations. For each generation it
+/// connects and authenticates, subscribes to `state_changed` events, loads the
+/// initial state snapshot, and only then starts the registered automations.
+/// Subscribing before loading the snapshot avoids a gap in which state changes
+/// could be missed.
+///
+/// When the connection is lost, the generation is cancelled. Automation tasks
+/// are given a short opportunity to observe cancellation and finish, after
+/// which any remaining tasks are aborted. After a one-second delay, a new
+/// connection generation is created and every automation is started again with
+/// a new [`Context`].
 #[derive(Clone)]
 pub struct App {
     pub(crate) home_assistant_url: String,
@@ -37,6 +50,15 @@ impl fmt::Debug for App {
 }
 
 impl App {
+    /// Creates an application for a Home Assistant base URL and access token.
+    ///
+    /// The URL must use `http` or `https`. Its query and fragment are ignored;
+    /// the WebSocket and REST state endpoints are derived as `/api/websocket`
+    /// and `/api/states`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `url` is not a valid URL or does not use `http` or `https`.
     pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
         let urls = HomeAssistantUrls::from_base_url(url.into());
         Self {
@@ -48,6 +70,11 @@ impl App {
         }
     }
 
+    /// Registers an [`Automation`] factory under `name`.
+    ///
+    /// The factory is retained by the application and called to create a fresh
+    /// automation instance whenever a connection generation starts. Registered
+    /// names need not be unique.
     pub fn automation<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
     where
         A: Automation,
@@ -60,6 +87,15 @@ impl App {
         self
     }
 
+    /// Registers an async automation function under `name`.
+    ///
+    /// The function is called once per connection generation with that
+    /// generation's [`Context`]. It must therefore be safe to call again after
+    /// connection loss. Registered names need not be unique.
+    ///
+    /// Returning an error while the generation is active causes [`App::run`]
+    /// to fail with [`Error::AutomationTask`]. [`Error::Cancelled`] is treated
+    /// as normal shutdown only when the generation has in fact been cancelled.
     pub fn automation_fn<F, Fut>(mut self, name: impl Into<String>, run: F) -> Self
     where
         F: Fn(Context) -> Fut + Send + Sync + 'static,
@@ -72,6 +108,7 @@ impl App {
         self
     }
 
+    /// Returns registered automation names in registration order.
     pub fn automation_names(&self) -> Vec<&str> {
         self.registrations
             .iter()
@@ -87,6 +124,21 @@ impl App {
         )
     }
 
+    /// Runs the application, reconnecting after connection loss.
+    ///
+    /// Initial connection failures reported as [`Error::Connection`] and
+    /// connection losses after startup are retried after one second. Each retry
+    /// creates a new generation, reloads the initial snapshot, and invokes all
+    /// automation factories again.
+    ///
+    /// An automation error or panic cancels its generation, aborts its sibling
+    /// automation tasks, and is returned as [`Error::AutomationTask`]. Other
+    /// non-connection errors encountered while setting up a generation are
+    /// returned unchanged. An automation that finishes successfully is not run
+    /// again until the next generation; if all automations finish, the
+    /// application continues waiting for connection loss.
+    ///
+    /// This method does not normally return successfully.
     pub async fn run(self) -> Result<()> {
         loop {
             match self.run_one_generation().await {
@@ -227,7 +279,19 @@ impl HomeAssistantUrls {
     }
 }
 
+/// An automation that can be instantiated anew for each connection generation.
+///
+/// Register implementations with [`App::automation`]. Connection loss cancels
+/// the supplied [`Context`], and [`App`] creates another instance with a new
+/// context after reconnecting.
 pub trait Automation: Send + 'static {
+    /// Runs this automation within `ctx`'s connection generation.
+    ///
+    /// The returned future should use cancellation-aware [`Context`] operations
+    /// or await [`Context::cancelled`] when doing its own coordination.
+    /// Returning an error while the generation remains active stops the
+    /// application and is surfaced by [`App::run`] as
+    /// [`Error::AutomationTask`].
     fn run(self, ctx: Context) -> BoxFuture<Result<()>>
     where
         Self: Sized;

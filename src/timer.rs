@@ -12,6 +12,12 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{Error, Result, runtime::BoxFuture};
 
+/// A future for the result of work started by [`Context::spawn`](crate::Context::spawn).
+///
+/// Awaiting the handle returns the task's result. A task panic or runtime abort
+/// is mapped to [`Error::AutomationTask`], while connection-generation
+/// cancellation normally yields [`Error::Cancelled`]. Dropping the handle
+/// detaches the task; it does not abort it.
 pub struct TaskHandle<T> {
     inner: BoxFuture<Result<T>>,
 }
@@ -36,6 +42,14 @@ impl<T> Future for TaskHandle<T> {
     }
 }
 
+/// A future for delayed work started by [`Context::run_after`](crate::Context::run_after).
+///
+/// Awaiting the handle returns the delayed future's result. A task panic or
+/// runtime abort is mapped to [`Error::AutomationTask`]. Generation or explicit
+/// timer cancellation normally yields [`Error::Cancelled`].
+///
+/// Dropping the handle detaches the timer and does not cancel it. Use
+/// [`TimerHandle::cancel`] when completion of cancellation must be observed.
 pub struct TimerHandle<T> {
     inner: BoxFuture<Result<T>>,
     control: Arc<TimerControl>,
@@ -56,6 +70,16 @@ impl<T: Send + 'static> TimerHandle<T> {
         }
     }
 
+    /// Requests cancellation and waits until the timer task has stopped.
+    ///
+    /// This is idempotent. If the delayed future has started, cancellation
+    /// drops it before this method returns. The method does not consume or
+    /// report the task's result; the handle may subsequently be awaited to
+    /// observe it. If cancellation won, that result is [`Error::Cancelled`];
+    /// if the task had already completed, its original result is retained.
+    ///
+    /// This method currently returns `Ok(())` after completion; task errors are
+    /// reported only by awaiting the handle.
     pub async fn cancel(&mut self) -> Result<()> {
         self.control.cancel();
         self.control.wait_complete().await;
