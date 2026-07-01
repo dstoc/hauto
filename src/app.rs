@@ -8,6 +8,9 @@ use crate::{
     runtime::{BoxFuture, Context},
 };
 
+#[cfg(test)]
+mod tests;
+
 /// Configures and runs a set of automations against Home Assistant.
 ///
 /// [`App::run`] operates in connection generations. For each generation it

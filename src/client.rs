@@ -39,6 +39,9 @@ use crate::{
     validate_domain_service, wait_cancelled,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// A lower-level handle to one Home Assistant connection generation.
 ///
 /// Clones share the same state cache, discovery cache, subscriptions, and

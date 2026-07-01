@@ -7,6 +7,9 @@ use crate::{
 
 use url::Url;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) trait RestStateTransport: Send + Sync + 'static {
     fn send(
         &self,
