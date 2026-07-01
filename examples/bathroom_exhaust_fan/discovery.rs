@@ -55,6 +55,10 @@ impl BathroomSpec {
     fn needs_area_for_fan(&self) -> bool {
         self.occupancy.is_none() || self.humidity_status.is_none()
     }
+
+    fn display_name(&self) -> &str {
+        self.area_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -156,7 +160,7 @@ pub async fn resolve_humidity_config(
     };
 
     Ok(HumidityStatusConfig {
-        name: bathroom.name.clone(),
+        name: bathroom.display_name().to_string(),
         status_entity: status_entity(bathroom, bathroom_area.as_ref())?,
         bathroom_temperature: temperature_sensor(
             bathroom.temperature.as_deref(),
@@ -253,7 +257,7 @@ async fn resolve_fan_bathroom(
     let humidity_status = Sensor::<String>::new(status_entity(bathroom, area.as_ref())?.as_str())?;
 
     Ok(FanBathroomConfig {
-        name: bathroom.name.clone(),
+        name: bathroom.display_name().to_string(),
         humidity_status,
         occupancy,
     })
@@ -345,6 +349,23 @@ mod tests {
         let bathroom = explicit_bathroom();
         assert!(!bathroom.needs_area_for_humidity());
         assert!(!bathroom.needs_area_for_fan());
+        assert_eq!(bathroom.display_name(), "Bathroom");
+    }
+
+    #[test]
+    fn area_name_is_used_as_the_bathroom_display_name() {
+        let bathroom = BathroomSpec::new(
+            "Bathroom 1",
+            Some("Main Bathroom".into()),
+            None,
+            None,
+            None,
+            None,
+            "HAUTO_BATHROOM_1_AREA",
+        )
+        .unwrap();
+
+        assert_eq!(bathroom.display_name(), "Main Bathroom");
     }
 
     #[test]

@@ -171,6 +171,9 @@ derive the same stable ID from Home Assistant's area ID:
 sensor.hauto_<area_id>_excess_humidity
 ```
 
+The published sensor's friendly name uses the configured area name, for
+example `Main Bathroom Excess Humidity`.
+
 These derived sensors are raw states created by hauto. They do not have entity
 registry entries, do not independently survive a Home Assistant restart, and
 cannot be assigned to a Home Assistant area. Assigning raw sensor state
