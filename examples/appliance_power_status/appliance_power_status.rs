@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use hauto::{Context, EntityId, Error as HautoError, HoldResult, Sensor, SensorValue, StateWrite};
+use hauto::{
+    Context, EntityId, Error as HautoError, HoldResult, Sensor, SensorValue, state::StateWrite,
+};
 use serde_json::json;
 
 #[derive(Clone, Debug)]

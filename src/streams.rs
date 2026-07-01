@@ -9,7 +9,7 @@ use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
 use serde_json::Value;
 
-use crate::{EntityId, StateChangedEvent};
+use crate::{entity::EntityId, state::StateChangedEvent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventStreamError {

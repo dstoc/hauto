@@ -1,5 +1,8 @@
 use crate::{
-    BoxFuture, DeleteStateResult, EntityId, EntityState, Error, Result, SetStateResult, StateWrite,
+    Error, Result,
+    entity::EntityId,
+    runtime::BoxFuture,
+    state::{DeleteStateResult, EntityState, SetStateResult, StateWrite},
 };
 
 use url::Url;

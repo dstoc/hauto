@@ -3,7 +3,10 @@ use std::{fmt, future::Future, sync::Arc, time::Duration};
 use tokio::task::JoinSet;
 use url::Url;
 
-use crate::{BoxFuture, Context, Error, Result};
+use crate::{
+    Error, Result,
+    runtime::{BoxFuture, Context},
+};
 
 #[derive(Clone)]
 pub struct App {

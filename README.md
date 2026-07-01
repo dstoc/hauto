@@ -69,7 +69,8 @@ than cancellation, `App::run` returns an `Error::AutomationTask`.
 - cancellation-aware `sleep`, `timeout`, `run_after`, and `spawn`
 - entity state-change streams
 - global state predicate waits
-- access to `HomeAssistantClient` for raw service, command, and state APIs
+- access to `hauto::client::HomeAssistantClient` for raw service, command, and
+  state APIs
 
 ## Entity handles
 
@@ -97,8 +98,8 @@ decode the new state:
 let temperature = temperature.next_change(&ctx).await?;
 ```
 
-Use `read(&StateCache)` inside global state predicates, where the current cache
-view is already available synchronously.
+Use `read(&hauto::state::StateCache)` inside global state predicates, where the
+current cache view is already available synchronously.
 
 Initial typed handles include:
 
@@ -188,7 +189,7 @@ light
     .await?;
 ```
 
-Escape hatches are available through `HomeAssistantClient`:
+Escape hatches are available through `hauto::client::HomeAssistantClient`:
 
 ```rust
 ctx.home_assistant()
@@ -210,7 +211,7 @@ let entity = hauto::EntityId::new("sensor.hauto_status")?;
 ctx.home_assistant()
     .set_state_raw(
         &entity,
-        hauto::StateWrite::new(
+        hauto::state::StateWrite::new(
             "ready",
             serde_json::json!({
                 "friendly_name": "hauto status",

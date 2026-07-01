@@ -1,7 +1,8 @@
 //! Example-specific entity discovery and override handling.
 
 use hauto::{
-    BinarySensor, Context, EntityCatalog, EntityId, EntitySet, Sensor, SensorValue, Switch,
+    BinarySensor, Context, EntityId, Sensor, SensorValue, Switch,
+    discovery::{AreaInfo, EntityCatalog, EntitySet},
 };
 
 use crate::{
@@ -263,10 +264,7 @@ async fn resolve_fan_bathroom(
     })
 }
 
-fn area(
-    catalog: &Option<EntityCatalog>,
-    area_name: Option<&str>,
-) -> hauto::Result<hauto::AreaInfo> {
+fn area(catalog: &Option<EntityCatalog>, area_name: Option<&str>) -> hauto::Result<AreaInfo> {
     catalog
         .as_ref()
         .expect("catalog loaded when an area is needed")
@@ -305,10 +303,7 @@ fn humidity_sensor(
     }
 }
 
-fn status_entity(
-    bathroom: &BathroomSpec,
-    area: Option<&hauto::AreaInfo>,
-) -> hauto::Result<EntityId> {
+fn status_entity(bathroom: &BathroomSpec, area: Option<&AreaInfo>) -> hauto::Result<EntityId> {
     match bathroom.humidity_status.as_deref() {
         Some(entity_id) => EntityId::new(entity_id),
         None => derived_status_entity(

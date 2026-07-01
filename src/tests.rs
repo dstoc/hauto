@@ -1,7 +1,11 @@
 use crate::*;
 use crate::{
     RestStateError, RestStateMethod, RestStateRequest, RestStateResponse, RestStateTransport,
+    client::HomeAssistantClient,
+    discovery::AreaInfo,
     rest::ReqwestRestStateTransport,
+    runtime::BoxFuture,
+    state::{DeleteStateResult, EntityState, SetStateResult, StateCache, StateWrite},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Map, json};

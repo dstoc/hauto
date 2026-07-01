@@ -21,7 +21,7 @@
 use std::{env, error::Error, time::Duration};
 
 use hauto::{
-    App, BinarySensor, Error as HautoError, Light, LightTurnOff, LightTurnOn, TimerHandle,
+    App, BinarySensor, Error as HautoError, Light, LightTurnOff, LightTurnOn, runtime::TimerHandle,
 };
 
 #[tokio::main(flavor = "current_thread")]

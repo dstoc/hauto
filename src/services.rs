@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-use crate::{EntityId, Error, Result};
+use crate::{Error, Result, entity::EntityId};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LightTurnOn {

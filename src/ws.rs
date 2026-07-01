@@ -17,9 +17,10 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::{
-    AreaId, EntityState, Error, Result, StateChangedEvent,
+    Error, Result,
     client::GenerationState,
-    discovery::{AreaRegistryEntry, EntityRegistryDisplayResponse, ExtractTargetResponse},
+    discovery::{AreaId, AreaRegistryEntry, EntityRegistryDisplayResponse, ExtractTargetResponse},
+    state::{EntityState, StateChangedEvent},
 };
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;

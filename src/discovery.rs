@@ -3,8 +3,9 @@ use std::{collections::HashSet, fmt, sync::Arc};
 use serde::Deserialize;
 
 use crate::{
-    BinarySensor, EntityId, Error, HomeAssistantClient, Result, Sensor, Switch,
-    client::GenerationState,
+    Error, Result,
+    client::{GenerationState, HomeAssistantClient},
+    entity::{BinarySensor, EntityId, Sensor, Switch},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -131,7 +132,7 @@ impl EntityCatalog {
     }
 }
 
-fn string_attribute(state: &crate::EntityState, key: &str) -> Option<String> {
+fn string_attribute(state: &crate::state::EntityState, key: &str) -> Option<String> {
     state
         .attributes
         .get(key)
@@ -432,7 +433,7 @@ mod tests {
     #[test]
     fn current_state_metadata_takes_precedence_over_registry_metadata() {
         let entity_id = EntityId::new("sensor.temperature").unwrap();
-        let state = crate::EntityState {
+        let state = crate::state::EntityState {
             entity_id: entity_id.clone(),
             state: "unavailable".to_string(),
             attributes: Map::from_iter([

@@ -3,9 +3,15 @@ use std::{fmt, marker::PhantomData, str::FromStr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use crate::state::{BinaryState, SensorValue};
+
 use crate::{
-    BinaryState, Context, EntityState, Error, LightTurnOff, LightTurnOn, Result, SensorValue,
-    StateCache, StateExpectation, StateWait, service_entity,
+    Error, Result,
+    context::Context,
+    service::{LightTurnOff, LightTurnOn},
+    service_entity,
+    state::{EntityState, StateCache},
+    wait::{StateExpectation, StateWait},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

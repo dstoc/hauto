@@ -82,52 +82,56 @@
 //! and state decoding are checked when reading state, waiting for state, or
 //! calling Home Assistant.
 
-use std::{future::Future, pin::Pin};
-
 mod app;
 mod cache;
-mod client;
+pub mod client;
 mod context;
-mod discovery;
-mod entity;
+pub mod discovery;
+pub mod entity;
 mod error;
 mod rest;
 mod services;
-mod state;
+pub mod state;
 mod streams;
 #[cfg(test)]
 mod tests;
 mod timer;
-mod wait;
+pub mod wait;
 #[allow(dead_code)]
 mod ws;
 
-pub use app::{App, Automation};
-pub use cache::StateCache;
-pub use client::HomeAssistantClient;
-pub use context::Context;
-pub use discovery::{AreaId, AreaInfo, DiscoveredEntity, EntityCatalog, EntityQuery, EntitySet};
-pub use entity::{BinarySensor, EntityId, Light, Sensor, Switch};
+/// Runtime entrypoints and cancellation-aware task and timer handles.
+pub mod runtime {
+    use std::{future::Future, pin::Pin};
+
+    pub use crate::{
+        app::{App, Automation},
+        context::Context,
+        timer::{TaskHandle, TimerHandle},
+    };
+
+    /// A boxed, sendable future used by automation implementations.
+    pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+}
+
+/// Typed Home Assistant service-call options.
+pub mod service {
+    pub use crate::services::{LightTurnOff, LightTurnOn};
+}
+
+pub use entity::{BinarySensor, BinaryState, EntityId, Light, Sensor, SensorValue, Switch};
 pub use error::Error;
+pub use runtime::{App, Automation, Context};
+pub use service::{LightTurnOff, LightTurnOn};
+pub use wait::{HoldResult, TimeoutResult, WaitResult};
+
 #[cfg(test)]
 pub(crate) use rest::{RestStateError, RestStateMethod, RestStateResponse};
 pub(crate) use rest::{
     RestStateRequest, RestStateTransport, map_delete_state_response, map_set_state_response,
 };
-pub use services::{LightTurnOff, LightTurnOn};
 pub(crate) use services::{service_entity, validate_domain_service};
-pub use state::{
-    Availability, BinaryState, DeleteStateResult, EntityState, SensorValue, SetStateResult,
-    StateChangedEvent, StateWrite,
-};
-pub use streams::{EventStreamError, RawEventStream, StateChangeStream};
-pub use timer::{TaskHandle, TimerHandle};
 pub(crate) use timer::{TimerCompletionGuard, TimerControl, wait_cancelled};
-pub use wait::{
-    GlobalStateWait, HoldResult, StateExpectation, StateWait, TimedGlobalStateWait, TimedStateWait,
-    TimeoutResult, WaitResult,
-};
 pub(crate) use ws::WsTransport;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;

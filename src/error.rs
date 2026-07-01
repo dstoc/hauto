@@ -1,6 +1,6 @@
 use thiserror::Error as ThisError;
 
-use crate::{AreaId, EntityId, EventStreamError};
+use crate::{client::EventStreamError, discovery::AreaId, entity::EntityId};
 
 #[derive(Debug, ThisError)]
 pub enum Error {

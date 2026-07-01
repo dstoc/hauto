@@ -10,7 +10,7 @@ use std::{
 
 use tokio::{sync::watch, task::JoinHandle};
 
-use crate::{BoxFuture, Error, Result};
+use crate::{Error, Result, runtime::BoxFuture};
 
 pub struct TaskHandle<T> {
     inner: BoxFuture<Result<T>>,

@@ -1,9 +1,14 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use crate::{
-    BinarySensor, EntityCatalog, EntityId, Error, GlobalStateWait, HomeAssistantClient, Light,
-    Result, StateCache, StateChangeStream, TaskHandle, TimeoutResult, TimerCompletionGuard,
-    TimerControl, TimerHandle, wait_cancelled,
+    Error, Result, TimerCompletionGuard, TimerControl,
+    client::{HomeAssistantClient, StateChangeStream},
+    discovery::EntityCatalog,
+    entity::{BinarySensor, EntityId, Light},
+    runtime::{TaskHandle, TimerHandle},
+    state::StateCache,
+    wait::{GlobalStateWait, TimeoutResult},
+    wait_cancelled,
 };
 
 #[derive(Clone, Debug)]
@@ -53,7 +58,9 @@ impl Context {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_seeded_states(states: impl IntoIterator<Item = crate::EntityState>) -> Self {
+    pub(crate) fn with_seeded_states(
+        states: impl IntoIterator<Item = crate::state::EntityState>,
+    ) -> Self {
         Self {
             home_assistant: HomeAssistantClient::with_seeded_states(states),
         }

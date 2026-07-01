@@ -1,4 +1,4 @@
-use crate::{EntityId, EntityState, client::GenerationState};
+use crate::{client::GenerationState, entity::EntityId, state::EntityState};
 
 /// Read-only access to the current Home Assistant state cache.
 ///

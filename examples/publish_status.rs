@@ -19,7 +19,7 @@
 
 use std::{env, error::Error, time::Duration};
 
-use hauto::{App, EntityId, StateWrite};
+use hauto::{App, EntityId, state::StateWrite};
 use serde_json::json;
 
 #[tokio::main(flavor = "current_thread")]

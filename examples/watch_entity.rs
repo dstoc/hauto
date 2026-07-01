@@ -18,7 +18,7 @@
 
 use std::{env, error::Error};
 
-use hauto::{App, EntityId, EntityState, Error as HautoError};
+use hauto::{App, EntityId, Error as HautoError, state::EntityState};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {

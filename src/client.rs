@@ -10,14 +10,17 @@ use std::{
 use serde_json::Value;
 use tokio::sync::{OnceCell, broadcast, watch};
 
+pub use crate::streams::{EventStreamError, RawEventStream, StateChangeStream};
+
 use crate::{
-    AreaId, DeleteStateResult, EntityId, EntityState, Error, RawEventStream, RestStateRequest,
-    RestStateTransport, Result, SetStateResult, StateChangeStream, StateChangedEvent, StateWrite,
-    WsTransport,
-    discovery::{AreaMembership, CatalogSnapshot},
+    Error, RestStateRequest, RestStateTransport, Result, WsTransport,
+    discovery::{AreaId, AreaMembership, CatalogSnapshot},
+    entity::EntityId,
     map_delete_state_response, map_set_state_response,
     rest::ReqwestRestStateTransport,
-    service_entity, validate_domain_service, wait_cancelled,
+    service_entity,
+    state::{DeleteStateResult, EntityState, SetStateResult, StateChangedEvent, StateWrite},
+    validate_domain_service, wait_cancelled,
 };
 
 #[derive(Clone)]

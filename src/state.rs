@@ -1,15 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{EntityId, Error, Result};
+pub use crate::cache::StateCache;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Availability {
-    Available,
-    Unavailable,
-    Unknown,
-}
-
+use crate::{Error, Result, entity::EntityId};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryState {
     On,

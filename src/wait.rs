@@ -7,8 +7,11 @@ use std::{
 };
 
 use crate::{
-    BinaryState, Context, EntityId, EntityState, Error, Result, StateCache, StateChangeStream,
-    StateChangedEvent,
+    Error, Result,
+    client::StateChangeStream,
+    context::Context,
+    entity::{BinaryState, EntityId},
+    state::{EntityState, StateCache, StateChangedEvent},
 };
 
 type StateDecoder<T> = fn(&EntityId, &EntityState) -> Result<T>;
