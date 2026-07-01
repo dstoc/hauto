@@ -1,3 +1,56 @@
+//! Wait for state conditions or check that they already hold.
+//!
+//! A *wait* completes when its condition becomes true. Entity and global waits
+//! evaluate the current cached state first, so an already-satisfied condition
+//! completes immediately unless a hold duration or
+//! [`StateWait::require_transition`] says otherwise. An *expectation* checks an
+//! entity's current cached state immediately and reports a mismatch instead of
+//! waiting for the condition to become true.
+//!
+//! [`StateWait::for_at_least`], [`GlobalStateWait::for_at_least`], and
+//! [`StateExpectation::for_at_least`] require the condition to remain true
+//! continuously. A change that makes the condition false interrupts the hold:
+//! waits continue looking for a new continuously matching interval, while an
+//! expectation returns [`HoldResult::Interrupted`]. Matching updates do not
+//! restart the interval. [`StateWait::within`] and
+//! [`GlobalStateWait::within`] bound the entire operation, including any hold
+//! interval, and report expiration as [`WaitResult::TimedOut`].
+//!
+//! Entity waits decode cached and event states using the entity handle's typed
+//! decoder. A missing initial state can still be followed by a wait, but an
+//! expectation on a missing entity returns [`crate::Error::EntityNotFound`].
+//! Deletion during a wait or hold also returns that error. A malformed state
+//! returns [`crate::Error::InvalidState`]; values such as `unknown` and
+//! `unavailable` are either represented or rejected according to the selected
+//! entity decoder.
+//!
+//! All operations belong to one [`crate::Context`] connection generation.
+//! Cancellation or connection loss ends them with an error (normally
+//! [`crate::Error::Cancelled`]); a hold is not resumed after reconnection.
+//! [`crate::App`] starts the automation again with a new context and a fresh
+//! wait.
+//!
+//! Builder types in this module are normally returned by entity or context
+//! methods rather than constructed directly:
+//!
+//! ```no_run
+//! # use std::time::Duration;
+//! # use hauto::{BinarySensor, Context, Result, WaitResult};
+//! # async fn example(sensor: &BinarySensor, ctx: &Context) -> Result<()> {
+//! match sensor
+//!     .wait_until_on(ctx)
+//!     .require_transition()
+//!     .for_at_least(Duration::from_secs(2))
+//!     .within(Duration::from_secs(30))
+//!     .await?
+//! {
+//!     WaitResult::Satisfied => {}
+//!     WaitResult::TimedOut => {}
+//! }
+//! # Ok(())
+//! # }
+//! ```
+
 use std::{
     fmt,
     future::{Future, IntoFuture},
@@ -18,6 +71,13 @@ type StateDecoder<T> = fn(&EntityId, &EntityState) -> Result<T>;
 type StateCondition<T> = Arc<dyn Fn(&T) -> bool + Send + Sync + 'static>;
 
 #[derive(Clone)]
+/// A builder that waits for one entity's decoded state to match a condition.
+///
+/// Entity methods such as `BinarySensor::wait_until_on` and
+/// `Sensor::wait_until_matching` normally return this type. Awaiting it yields
+/// [`Result<()>`](crate::Result): `Ok(())` means the condition was satisfied
+/// (and held for any requested duration). The wait has no timeout unless
+/// [`within`](Self::within) is applied.
 pub struct StateWait<'a, T = BinaryState> {
     ctx: &'a Context,
     entity_id: EntityId,
@@ -61,16 +121,37 @@ where
         }
     }
 
+    /// Requires a false-to-true observation before this wait can complete.
+    ///
+    /// Without this option, an already-matching cached state is accepted.
+    /// With it, an initially matching condition is rejected until a later
+    /// decoded state does not match and a subsequent state matches. An
+    /// initially missing or non-matching state already satisfies the "false"
+    /// side of this requirement.
     pub fn require_transition(mut self) -> Self {
         self.require_transition = true;
         self
     }
 
+    /// Requires the condition to remain true continuously for `duration`.
+    ///
+    /// A non-matching update interrupts the interval and the wait continues
+    /// until a new matching interval lasts long enough. Matching updates do
+    /// not restart the timer. A zero duration behaves like no hold.
+    ///
+    /// Deletion or a state that cannot be decoded ends the wait with an error
+    /// rather than interrupting and restarting the interval.
     pub fn for_at_least(mut self, duration: Duration) -> Self {
         self.hold_for = Some(duration);
         self
     }
 
+    /// Limits the total time available for this wait.
+    ///
+    /// The timeout includes time spent waiting for the first match and time
+    /// spent satisfying [`for_at_least`](Self::for_at_least). Awaiting the
+    /// returned builder yields `Ok(WaitResult::TimedOut)` on ordinary
+    /// expiration; cancellation and state errors remain errors.
     pub fn within(self, duration: Duration) -> TimedStateWait<'a, T> {
         TimedStateWait {
             wait: self,
@@ -106,6 +187,13 @@ where
 }
 
 #[derive(Clone)]
+/// A time-bounded [`StateWait`].
+///
+/// This type is normally returned by [`StateWait::within`]. Awaiting it yields
+/// [`Result<WaitResult>`](crate::Result): [`WaitResult::Satisfied`] indicates
+/// completion and [`WaitResult::TimedOut`] indicates ordinary timeout expiry.
+/// Entity deletion, malformed state, cancellation, and connection failures
+/// are returned as errors instead.
 pub struct TimedStateWait<'a, T = BinaryState> {
     wait: StateWait<'a, T>,
     timeout: Duration,
@@ -120,6 +208,13 @@ impl<T> fmt::Debug for TimedStateWait<'_, T> {
     }
 }
 
+/// A builder that waits for a predicate over the complete cached state.
+///
+/// [`Context::wait_until_state`](crate::Context::wait_until_state) normally
+/// returns this type. Its predicate is evaluated immediately and again after
+/// every state-change event. Awaiting the builder yields
+/// [`Result<()>`](crate::Result); predicate errors and connection-generation
+/// cancellation are propagated.
 pub struct GlobalStateWait<'a, F> {
     ctx: &'a Context,
     predicate: F,
@@ -147,11 +242,23 @@ where
         }
     }
 
+    /// Requires the predicate to remain true continuously for `duration`.
+    ///
+    /// While holding, every state-change event causes the predicate to be
+    /// evaluated against the latest cache. A false result interrupts the
+    /// interval, after which the wait looks for a new true interval. A zero
+    /// duration behaves like no hold. Predicate errors end the wait.
     pub fn for_at_least(mut self, duration: Duration) -> Self {
         self.hold_for = Some(duration);
         self
     }
 
+    /// Limits the total time available for this wait.
+    ///
+    /// The timeout includes any interval requested by
+    /// [`for_at_least`](Self::for_at_least). Awaiting the returned builder
+    /// reports ordinary expiry as [`WaitResult::TimedOut`], while predicate,
+    /// cancellation, and connection errors remain errors.
     pub fn within(self, duration: Duration) -> TimedGlobalStateWait<'a, F> {
         TimedGlobalStateWait {
             wait: self,
@@ -172,6 +279,12 @@ where
     }
 }
 
+/// A time-bounded [`GlobalStateWait`].
+///
+/// This type is normally returned by [`GlobalStateWait::within`]. Awaiting it
+/// yields [`Result<WaitResult>`](crate::Result), distinguishing satisfaction
+/// from ordinary timeout expiry. Predicate errors and generation cancellation
+/// are returned as errors rather than timeout results.
 pub struct TimedGlobalStateWait<'a, F> {
     wait: GlobalStateWait<'a, F>,
     timeout: Duration,
@@ -245,6 +358,15 @@ where
 }
 
 #[derive(Clone)]
+/// A builder that immediately checks one entity's decoded state.
+///
+/// Entity methods such as `BinarySensor::expect_on` and
+/// `Sensor::expect_matching` normally return this type. Unlike [`StateWait`],
+/// an expectation does not wait for a currently false condition to become
+/// true. Awaiting it yields [`Result<HoldResult<T>>`](crate::Result), including
+/// the actual decoded state for a mismatch or interrupted hold.
+///
+/// A missing current entity is an error, as is a malformed current state.
 pub struct StateExpectation<'a, T = BinaryState> {
     ctx: &'a Context,
     entity_id: EntityId,
@@ -285,6 +407,16 @@ where
         }
     }
 
+    /// Requires an initially matching condition to remain continuously true.
+    ///
+    /// If the initial state does not match, awaiting returns
+    /// [`HoldResult::NotSatisfied`] immediately. If a later decoded state
+    /// stops matching before `duration` elapses, it returns
+    /// [`HoldResult::Interrupted`] with that state. Matching updates do not
+    /// restart the timer, and a zero duration succeeds immediately.
+    ///
+    /// Entity deletion, malformed state, cancellation, or connection loss
+    /// returns an error rather than a `HoldResult`.
     pub fn for_at_least(mut self, duration: Duration) -> Self {
         self.hold_for = Some(duration);
         self
@@ -318,21 +450,40 @@ where
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The outcome of awaiting a wait builder configured with `within`.
 pub enum WaitResult {
+    /// The condition was satisfied, including any required hold interval.
     Satisfied,
+    /// The configured timeout elapsed before the condition was satisfied.
     TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The outcome of checking a [`StateExpectation`].
 pub enum HoldResult<T> {
+    /// The condition was initially satisfied and held for the requested time.
     Held,
+    /// The current state did not satisfy the condition.
+    ///
+    /// `actual` is the decoded state observed by the immediate check.
     NotSatisfied { actual: T },
+    /// The condition was initially satisfied but stopped matching during its
+    /// required hold interval.
+    ///
+    /// `actual` is the first decoded non-matching state.
     Interrupted { actual: T },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The generic outcome of [`Context::timeout`](crate::Context::timeout).
+///
+/// Wait builders configured with `within` translate this type into
+/// [`WaitResult`], but it is also useful when timing arbitrary
+/// cancellation-aware work.
 pub enum TimeoutResult<T> {
+    /// The operation completed before the deadline with its output.
     Completed(T),
+    /// The deadline elapsed before the operation completed.
     TimedOut,
 }
 
