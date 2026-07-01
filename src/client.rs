@@ -17,7 +17,7 @@ use crate::{
     discovery::{AreaMembership, CatalogSnapshot},
     map_delete_state_response, map_set_state_response,
     rest::ReqwestRestStateTransport,
-    service_entity, validate_domain_service,
+    service_entity, validate_domain_service, wait_cancelled,
 };
 
 #[derive(Clone)]
@@ -294,10 +294,10 @@ impl HomeAssistantClient {
 
     pub(crate) async fn discovery_catalog(&self) -> Result<Arc<CatalogSnapshot>> {
         self.ensure_generation_active()?;
-        let snapshot = self
-            .generation
-            .discovery_catalog
-            .get_or_try_init(|| async {
+        let mut cancelled = self.cancelled_receiver();
+        let snapshot = tokio::select! {
+            biased;
+            snapshot = self.generation.discovery_catalog.get_or_try_init(|| async {
                 self.ensure_generation_active()?;
                 let Some(transport) = &self.ws else {
                     return Err(Error::NotImplemented("HomeAssistantClient::entity_catalog"));
@@ -312,8 +312,9 @@ impl HomeAssistantClient {
                     entities,
                     &self.generation,
                 )?))
-            })
-            .await?;
+            }) => snapshot?,
+            () = wait_cancelled(&mut cancelled) => return Err(Error::Cancelled),
+        };
         self.ensure_generation_active()?;
         Ok(snapshot.clone())
     }
@@ -330,8 +331,10 @@ impl HomeAssistantClient {
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
         };
-        let membership = cell
-            .get_or_try_init(|| async {
+        let mut cancelled = self.cancelled_receiver();
+        let membership = tokio::select! {
+            biased;
+            membership = cell.get_or_try_init(|| async {
                 self.ensure_generation_active()?;
                 let Some(transport) = &self.ws else {
                     return Err(Error::NotImplemented("HomeAssistantClient::entities_in"));
@@ -339,8 +342,9 @@ impl HomeAssistantClient {
                 let response = transport.extract_area(area_id).await?;
                 self.ensure_generation_active()?;
                 Ok(Arc::new(response.referenced_entities.into_iter().collect()))
-            })
-            .await?;
+            }) => membership?,
+            () = wait_cancelled(&mut cancelled) => return Err(Error::Cancelled),
+        };
         self.ensure_generation_active()?;
         Ok(membership.clone())
     }
