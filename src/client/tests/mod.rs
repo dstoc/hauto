@@ -4,6 +4,7 @@ use crate::test_support::run_async;
 use serde_json::json;
 
 mod rest;
+mod websocket;
 
 #[test]
 fn call_service_raw_validates_domain_and_service_before_placeholder() {

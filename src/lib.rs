@@ -117,8 +117,6 @@ pub mod state;
 mod streams;
 #[cfg(test)]
 mod test_support;
-#[cfg(test)]
-mod tests;
 mod timer;
 pub mod wait;
 #[allow(dead_code)]
