@@ -82,11 +82,11 @@ The status sensor attributes include:
 - `absolute_humidity_excess`
 - `relative_humidity_excess`
 
-Possible improvement: the example records rate-of-rise samples whenever the
-publisher wakes for a relevant state change or poll tick, so sample spacing is
-not perfectly constant. For sharper shower detection, keep a fixed-cadence
-humidity history, such as one sample every 30 seconds, and use sensor-change
-events only to wake the publisher for immediate threshold re-evaluation.
+Rate-of-rise history is sampled at most once every 30 seconds. Sensor-change
+events still trigger immediate threshold and rate re-evaluation using the
+current reading, but closely spaced events do not add redundant history
+samples. Poll ticks ensure samples are also recorded while sensor values remain
+unchanged.
 
 ## Fan controller
 

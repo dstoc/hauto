@@ -25,6 +25,7 @@ pub struct HumiditySettings {
     pub minimum_run: Duration,
     pub maximum_run: Duration,
     pub poll_interval: Duration,
+    pub sample_interval: Duration,
     pub absolute_humidity_start_excess: f64,
     pub absolute_humidity_clear_excess: f64,
     pub relative_humidity_start_excess: f64,
@@ -44,6 +45,7 @@ impl Default for HumiditySettings {
             minimum_run: Duration::from_secs(10 * 60),
             maximum_run: Duration::from_secs(90 * 60),
             poll_interval: Duration::from_secs(30),
+            sample_interval: Duration::from_secs(30),
             absolute_humidity_start_excess: 2.0,
             absolute_humidity_clear_excess: 0.8,
             relative_humidity_start_excess: 12.0,
@@ -103,9 +105,9 @@ impl HumidityStatus {
             return HumidityPublish::unknown(evaluation.reason);
         };
 
-        self.record_sample(now, reading);
-
-        let rise_started = humidity_rise_started(&self.samples, now, &self.config.settings);
+        record_sample_if_due(&mut self.samples, now, reading, &self.config.settings);
+        let rise_started =
+            humidity_rise_started(&self.samples, now, reading, &self.config.settings);
         let start = reading.humidity_start(&self.config.settings) || rise_started;
         let clear = reading.humidity_clear(&self.config.settings);
         let extreme = reading.extremely_humid(&self.config.settings);
@@ -165,20 +167,6 @@ impl HumidityStatus {
                     )
                 }
             }
-        }
-    }
-
-    fn record_sample(&mut self, now: Instant, reading: HumidityReading) {
-        self.samples.push_back(HumiditySample {
-            at: now,
-            absolute_humidity: reading.bathroom_absolute_humidity,
-            relative_humidity: Some(reading.bathroom_relative_humidity),
-        });
-
-        while self.samples.front().is_some_and(|sample| {
-            now.duration_since(sample.at) > self.config.settings.rise_window * 2
-        }) {
-            self.samples.pop_front();
         }
     }
 
@@ -395,10 +383,13 @@ fn absolute_humidity(temperature_c: Option<f64>, relative_humidity: Option<f64>)
 fn humidity_rise_started(
     samples: &VecDeque<HumiditySample>,
     now: Instant,
+    reading: HumidityReading,
     settings: &HumiditySettings,
 ) -> bool {
-    let Some(current) = samples.back() else {
-        return false;
+    let current = HumiditySample {
+        at: now,
+        absolute_humidity: reading.bathroom_absolute_humidity,
+        relative_humidity: Some(reading.bathroom_relative_humidity),
     };
 
     samples
@@ -419,6 +410,33 @@ fn humidity_rise_started(
                 });
             absolute_rise || relative_rise
         })
+}
+
+fn record_sample_if_due(
+    samples: &mut VecDeque<HumiditySample>,
+    now: Instant,
+    reading: HumidityReading,
+    settings: &HumiditySettings,
+) {
+    while samples
+        .front()
+        .is_some_and(|sample| now.duration_since(sample.at) > settings.rise_window * 2)
+    {
+        samples.pop_front();
+    }
+
+    if samples
+        .back()
+        .is_some_and(|sample| now.duration_since(sample.at) < settings.sample_interval)
+    {
+        return;
+    }
+
+    samples.push_back(HumiditySample {
+        at: now,
+        absolute_humidity: reading.bathroom_absolute_humidity,
+        relative_humidity: Some(reading.bathroom_relative_humidity),
+    });
 }
 
 fn start_reason(
@@ -449,5 +467,62 @@ fn ignore_sensor_change(result: hauto::Result<SensorValue<f64>>) -> hauto::Resul
     match result {
         Ok(_) | Err(HautoError::EntityNotFound(_)) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reading(relative_humidity: f64) -> HumidityReading {
+        HumidityReading {
+            bathroom_relative_humidity: relative_humidity,
+            ambient_relative_humidity: 50.0,
+            bathroom_absolute_humidity: None,
+            ambient_absolute_humidity: None,
+        }
+    }
+
+    #[test]
+    fn samples_are_not_recorded_more_often_than_the_sample_interval() {
+        let settings = HumiditySettings::default();
+        let start = Instant::now();
+        let mut samples = VecDeque::new();
+
+        record_sample_if_due(&mut samples, start, reading(50.0), &settings);
+        record_sample_if_due(
+            &mut samples,
+            start + Duration::from_secs(10),
+            reading(51.0),
+            &settings,
+        );
+        assert_eq!(samples.len(), 1);
+
+        record_sample_if_due(
+            &mut samples,
+            start + settings.sample_interval,
+            reading(52.0),
+            &settings,
+        );
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples.back().unwrap().relative_humidity, Some(52.0));
+    }
+
+    #[test]
+    fn rise_detection_uses_the_current_reading_between_samples() {
+        let settings = HumiditySettings::default();
+        let start = Instant::now();
+        let samples = VecDeque::from([HumiditySample {
+            at: start,
+            absolute_humidity: None,
+            relative_humidity: Some(50.0),
+        }]);
+
+        assert!(humidity_rise_started(
+            &samples,
+            start + settings.rise_window,
+            reading(57.0),
+            &settings,
+        ));
     }
 }
