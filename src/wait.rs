@@ -465,13 +465,17 @@ pub enum HoldResult<T> {
     Held,
     /// The current state did not satisfy the condition.
     ///
-    /// `actual` is the decoded state observed by the immediate check.
-    NotSatisfied { actual: T },
+    NotSatisfied {
+        /// The decoded state observed by the immediate check.
+        actual: T,
+    },
     /// The condition was initially satisfied but stopped matching during its
     /// required hold interval.
     ///
-    /// `actual` is the first decoded non-matching state.
-    Interrupted { actual: T },
+    Interrupted {
+        /// The first decoded non-matching state observed during the hold.
+        actual: T,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
