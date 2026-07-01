@@ -4,17 +4,36 @@ use serde_json::{Map, Value};
 
 use crate::{Error, Result, entity::EntityId};
 
+/// Options for a Home Assistant `light.turn_on` service call.
+///
+/// Every `None` field is omitted from the service data, allowing Home
+/// Assistant to retain or choose that setting. `brightness_pct` and
+/// `brightness` are alternative brightness representations; callers should
+/// normally set at most one. If both are set, both are forwarded and Home
+/// Assistant decides how to handle the combination.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LightTurnOn {
+    /// Brightness as a percentage in the inclusive range `0..=100`.
     pub brightness_pct: Option<u8>,
+    /// Brightness in Home Assistant's inclusive `0..=255` scale.
     pub brightness: Option<u8>,
+    /// Fade duration, encoded in the service data as fractional seconds.
     pub transition: Option<Duration>,
+    /// Color temperature in kelvin.
+    ///
+    /// No range is enforced locally because supported ranges vary by light.
     pub color_temp_kelvin: Option<u16>,
+    /// Red, green, and blue channels, each in the inclusive range `0..=255`.
     pub rgb_color: Option<(u8, u8, u8)>,
+    /// Integration-defined effect name.
     pub effect: Option<String>,
 }
 
 impl LightTurnOn {
+    /// Validates locally enforceable option ranges.
+    ///
+    /// Returns an error when `brightness_pct` exceeds `100`. Device-specific
+    /// color-temperature and effect support is left to Home Assistant.
     pub fn validate(&self) -> Result<()> {
         if let Some(brightness_pct) = self.brightness_pct
             && brightness_pct > 100
@@ -45,8 +64,13 @@ impl LightTurnOn {
     }
 }
 
+/// Options for a Home Assistant `light.turn_off` service call.
+///
+/// The call always targets the handle's entity ID. A missing transition is
+/// omitted from the service data.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LightTurnOff {
+    /// Fade duration, encoded in the service data as fractional seconds.
     pub transition: Option<Duration>,
 }
 
