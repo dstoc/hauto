@@ -1,3 +1,19 @@
+//! Lower-level, generation-scoped Home Assistant access.
+//!
+//! [`HomeAssistantClient`](crate::client::HomeAssistantClient) combines typed
+//! convenience operations with `_raw`
+//! escape hatches. Raw WebSocket commands accept and return protocol JSON; raw
+//! state methods use the public state representations without entity-specific
+//! decoding. Every client is bound to one connection generation. Cancellation
+//! makes new operations fail with [`Error::Cancelled`](crate::Error::Cancelled),
+//! and callers must obtain the replacement client from a restarted automation.
+//!
+//! Subscriptions contain only events received after subscription. They neither
+//! replay current state nor reconnect themselves; see
+//! [`StateChangeStream`](crate::client::StateChangeStream) and
+//! [`RawEventStream`](crate::client::RawEventStream) for terminal lag and
+//! closure behavior.
+
 use std::{
     collections::HashMap,
     fmt,
@@ -23,6 +39,17 @@ use crate::{
     validate_domain_service, wait_cancelled,
 };
 
+/// A lower-level handle to one Home Assistant connection generation.
+///
+/// Clones share the same state cache, discovery cache, subscriptions, and
+/// cancellation state. The runtime replaces the client rather than reviving it
+/// after reconnect. Prefer typed entity and service APIs when available; the
+/// methods ending in `_raw` expose protocol-level values and validation.
+///
+/// [`Default`] creates an isolated in-memory generation without WebSocket or
+/// REST transports. Network-dependent methods then return
+/// [`Error::NotImplemented`], except raw event subscription, which returns an
+/// already-ended placeholder stream.
 #[derive(Clone)]
 pub struct HomeAssistantClient {
     pub(crate) generation: Arc<GenerationState>,
@@ -138,6 +165,21 @@ impl HomeAssistantClient {
         Ok(self.generation.remove_cached_state(entity_id))
     }
 
+    /// Calls a Home Assistant service and returns the WebSocket result payload.
+    ///
+    /// `domain` and `service` are rejected only when their trimmed values are
+    /// empty. Otherwise, the original strings are passed through unchanged;
+    /// identifier syntax is not validated here. `data` is sent as the
+    /// `service_data` value of a `call_service` command, and its
+    /// service-specific shape is not validated here.
+    ///
+    /// The call fails with [`Error::Cancelled`] for an inactive generation,
+    /// [`Error::NotSent`] if a known-closed socket prevents sending,
+    /// [`Error::ServiceRejected`] for a negative protocol result, or
+    /// [`Error::OutcomeUnknown`] when sending was attempted but no definitive
+    /// result arrived. A client without a WebSocket transport returns
+    /// [`Error::NotImplemented`]. Dropping the future does not retract a
+    /// command that may already have been sent.
     pub async fn call_service_raw(
         &self,
         domain: &str,
@@ -155,6 +197,19 @@ impl HomeAssistantClient {
         transport.call_service_raw(domain, service, data).await
     }
 
+    /// Sends an arbitrary Home Assistant WebSocket command.
+    ///
+    /// `command` must be a JSON object with a non-empty string `type` and no
+    /// caller-supplied `id`; the client assigns the request ID. The returned
+    /// value is the command's `result` payload, without typed decoding.
+    ///
+    /// Cancellation is checked before sending. Protocol rejection, a known
+    /// pre-send closure, connection/protocol failure, and an indeterminate
+    /// post-send outcome are reported by the corresponding [`Error`] variants.
+    /// A client without a WebSocket transport returns
+    /// [`Error::NotImplemented`]. Once sending is attempted, cancellation or
+    /// dropping this future cannot guarantee that Home Assistant did not
+    /// execute the command.
     pub async fn command_raw(&self, command: Value) -> Result<Value> {
         self.ensure_generation_active()?;
         let object = command.as_object().ok_or_else(|| {
@@ -184,6 +239,20 @@ impl HomeAssistantClient {
         transport.command_raw(command).await
     }
 
+    /// Creates or updates an ephemeral Home Assistant state-machine entry.
+    ///
+    /// This sends `POST /api/states/{entity_id}`. It does not create or update
+    /// an entity-registry entry and does not call an integration or device.
+    /// [`StateWrite::validate`] is applied before the request. HTTP 201 returns
+    /// [`SetStateResult::Created`], HTTP 200 returns
+    /// [`SetStateResult::Updated`], and other statuses are
+    /// [`Error::ServiceRejected`].
+    ///
+    /// A transport failure after request sending begins is conservatively
+    /// [`Error::OutcomeUnknown`] and is not retried. Local transport/setup
+    /// failures are [`Error::Connection`]; generation cancellation before the
+    /// request is [`Error::Cancelled`]. A client without a REST transport
+    /// returns [`Error::NotImplemented`].
     pub async fn set_state_raw(
         &self,
         entity_id: &EntityId,
@@ -205,6 +274,18 @@ impl HomeAssistantClient {
         }
     }
 
+    /// Deletes an ephemeral Home Assistant state-machine entry.
+    ///
+    /// This sends `DELETE /api/states/{entity_id}`; it does not remove an
+    /// entity-registry entry. HTTP 200 or 204 returns
+    /// [`DeleteStateResult::Deleted`], while HTTP 404 returns
+    /// [`DeleteStateResult::NotFound`]. Other statuses are
+    /// [`Error::ServiceRejected`].
+    ///
+    /// A transport failure after request sending begins is conservatively
+    /// [`Error::OutcomeUnknown`] and is not retried. Generation cancellation
+    /// before the request is [`Error::Cancelled`]. A client without a REST
+    /// transport returns [`Error::NotImplemented`].
     pub async fn delete_state_raw(&self, entity_id: &EntityId) -> Result<DeleteStateResult> {
         self.ensure_generation_active()?;
         let Some(transport) = &self.rest_states else {
@@ -223,6 +304,13 @@ impl HomeAssistantClient {
         }
     }
 
+    /// Returns the entity's raw state from this generation's current cache.
+    ///
+    /// Despite being async, this method does not issue a REST GET. The cache is
+    /// initialized from Home Assistant and maintained by `state_changed`
+    /// events. A missing entry returns [`Error::EntityNotFound`], including
+    /// after an event deletes it; `unknown` and `unavailable` remain successful
+    /// raw [`EntityState`] values. Cancellation returns [`Error::Cancelled`].
     pub async fn get_state_raw(&self, entity_id: &EntityId) -> Result<EntityState> {
         self.ensure_generation_active()?;
         self.generation
@@ -230,6 +318,12 @@ impl HomeAssistantClient {
             .ok_or_else(|| Error::EntityNotFound(entity_id.clone()))
     }
 
+    /// Subscribes to all later state changes in this generation.
+    ///
+    /// The current cache is not replayed. The returned stream is unfiltered,
+    /// ends when its event source closes, and reports buffer lag once as a
+    /// terminal [`EventStreamError::Lagged`] item. It does not reconnect or
+    /// emit cancellation as an item.
     pub async fn subscribe_state_changes(&self) -> Result<StateChangeStream> {
         self.ensure_generation_active()?;
         Ok(StateChangeStream::new(
@@ -238,6 +332,19 @@ impl HomeAssistantClient {
         ))
     }
 
+    /// Subscribes to later raw Home Assistant events.
+    ///
+    /// If supplied, `event_type` is sent in the `subscribe_events` command and
+    /// retained as an exact, case-sensitive local filter. Items are raw event
+    /// objects, normally containing `event_type`, `data`, `origin`, `time_fired`,
+    /// and `context`; malformed objects that do not match a requested type are
+    /// skipped rather than decoded.
+    ///
+    /// Subscription rejection and protocol failures are returned before the
+    /// stream is created. The stream has no replay, is generation-scoped, and
+    /// treats lag as terminal. Closure ends it with `None`; it does not
+    /// reconnect or emit cancellation as an item. On a client with no
+    /// WebSocket transport, this returns an already-ended placeholder stream.
     pub async fn subscribe_events_raw(&self, _event_type: Option<&str>) -> Result<RawEventStream> {
         self.ensure_generation_active()?;
         let Some(transport) = &self.ws else {
@@ -251,11 +358,19 @@ impl HomeAssistantClient {
         ))
     }
 
+    /// Calls the generic `homeassistant.turn_on` service for one entity.
+    ///
+    /// The service data is the JSON object `{ "entity_id": "domain.object" }`.
+    /// Error and cancellation semantics are those of [`Self::call_service_raw`].
     pub async fn turn_on(&self, entity_id: &EntityId) -> Result<Value> {
         self.call_service_raw("homeassistant", "turn_on", service_entity(entity_id))
             .await
     }
 
+    /// Calls the generic `homeassistant.turn_off` service for one entity.
+    ///
+    /// The service data is the JSON object `{ "entity_id": "domain.object" }`.
+    /// Error and cancellation semantics are those of [`Self::call_service_raw`].
     pub async fn turn_off(&self, entity_id: &EntityId) -> Result<Value> {
         self.call_service_raw("homeassistant", "turn_off", service_entity(entity_id))
             .await

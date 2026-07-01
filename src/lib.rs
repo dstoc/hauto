@@ -81,16 +81,42 @@
 //! not check whether the entity currently exists in Home Assistant. Existence
 //! and state decoding are checked when reading state, waiting for state, or
 //! calling Home Assistant.
+//!
+//! # API map
+//!
+//! - [`entity`] contains entity IDs, typed handles, and decoded values.
+//! - [`discovery`] finds areas and entities from a per-generation catalog.
+//! - [`wait`] contains state wait and expectation builders and their results.
+//! - [`state`] contains cached, event, and REST state representations.
+//! - [`runtime`] contains [`App`], [`Context`], automations, tasks, and timers.
+//! - [`service`] contains typed service-call options.
+//! - [`client`] contains the lower-level Home Assistant client and event streams.
+
+#![deny(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
 
 mod app;
 mod cache;
+/// Lower-level Home Assistant operations and generation-scoped event streams.
+///
+/// Typed helpers such as [`client::HomeAssistantClient::turn_on`] build known service
+/// calls. Methods ending in `_raw` expose JSON or raw state representations and
+/// require callers to honor the documented Home Assistant protocol shapes.
+/// Clients and streams belong to one connection generation and do not migrate
+/// across an [`App`] reconnect.
 pub mod client;
 mod context;
+/// Area and entity discovery from Home Assistant registries.
+///
+/// See [`discovery::EntityCatalog`] for caching, matching, and
+/// registry-visibility semantics.
 pub mod discovery;
+/// Validated entity identities, typed handles, and decoded entity values.
 pub mod entity;
 mod error;
 mod rest;
 mod services;
+/// Cached state, state-change events, and REST state-write representations.
 pub mod state;
 mod streams;
 #[cfg(test)]
@@ -101,6 +127,11 @@ pub mod wait;
 mod ws;
 
 /// Runtime entrypoints and cancellation-aware task and timer handles.
+///
+/// Each connection generation loads initial state, subscribes to events, and
+/// starts the registered automations. Losing that generation cancels its
+/// contexts and work before [`App`] starts the automations again with a new
+/// [`Context`].
 pub mod runtime {
     use std::{future::Future, pin::Pin};
 
@@ -110,11 +141,14 @@ pub mod runtime {
         timer::{TaskHandle, TimerHandle},
     };
 
-    /// A boxed, sendable future used by automation implementations.
+    /// A boxed, sendable, `'static` future used by automation implementations.
     pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 }
 
 /// Typed Home Assistant service-call options.
+///
+/// Option types validate their values and serialize only supplied fields into
+/// the corresponding Home Assistant service payload.
 pub mod service {
     pub use crate::services::{LightTurnOff, LightTurnOn};
 }
@@ -134,4 +168,5 @@ pub(crate) use services::{service_entity, validate_domain_service};
 pub(crate) use timer::{TimerCompletionGuard, TimerControl, wait_cancelled};
 pub(crate) use ws::WsTransport;
 
+/// The crate's result type, defaulting its error to [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;

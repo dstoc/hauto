@@ -1,3 +1,5 @@
+//! Generation-scoped event stream implementations re-exported by [`crate::client`].
+
 use std::{
     pin::Pin,
     task::{Context, Poll},
@@ -11,12 +13,35 @@ use serde_json::Value;
 
 use crate::{entity::EntityId, state::StateChangedEvent};
 
+/// A terminal failure reported as the last item of an event stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventStreamError {
-    Lagged { dropped: Option<usize> },
+    /// The bounded local broadcast buffer overflowed.
+    ///
+    /// The stream terminates after this item because its event sequence is no
+    /// longer complete.
+    Lagged {
+        /// Number of skipped items when it can be represented as `usize`.
+        dropped: Option<usize>,
+    },
+    /// The stream's underlying Home Assistant connection was lost.
+    ///
+    /// Current stream implementations normally signal source closure by ending
+    /// with `None`; this variant is available where connection loss is surfaced
+    /// explicitly.
     ConnectionLost,
 }
 
+/// A stream of state-change events received after subscription.
+///
+/// No current cached state is emitted. A stream created by
+/// [`Context::state_changes`](crate::Context::state_changes) uses an exact
+/// entity-ID filter; [`HomeAssistantClient::subscribe_state_changes`](crate::client::HomeAssistantClient::subscribe_state_changes)
+/// is unfiltered. Non-matching events are skipped.
+///
+/// Lag produces one terminal [`EventStreamError::Lagged`] item. Closing the
+/// generation's event source ends the stream with `None`. Streams do not
+/// reconnect or continue into the next runtime generation.
 #[derive(Debug)]
 pub struct StateChangeStream {
     receiver: BroadcastStream<StateChangedEvent>,
@@ -36,6 +61,10 @@ impl StateChangeStream {
         }
     }
 
+    /// Waits for the next matching event or terminal stream error.
+    ///
+    /// Returns `None` after source closure or after a terminal lag error has
+    /// already been returned.
     pub async fn next(
         &mut self,
     ) -> Option<std::result::Result<StateChangedEvent, EventStreamError>> {
@@ -77,6 +106,12 @@ impl Stream for StateChangeStream {
     }
 }
 
+/// A stream of raw Home Assistant event objects received after subscription.
+///
+/// A requested event type is matched exactly and case-sensitively against the
+/// string `event_type` field; non-matching or malformed event objects are
+/// skipped. There is no replay. Lag is a terminal error, source closure returns
+/// `None`, and the stream never reconnects into a later generation.
 #[derive(Debug)]
 pub struct RawEventStream {
     receiver: Option<BroadcastStream<Value>>,
@@ -104,6 +139,10 @@ impl RawEventStream {
         }
     }
 
+    /// Waits for the next matching raw event or terminal stream error.
+    ///
+    /// Returns `None` after source closure or after a terminal lag error has
+    /// already been returned.
     pub async fn next(&mut self) -> Option<std::result::Result<Value, EventStreamError>> {
         std::future::poll_fn(|cx| Stream::poll_next(Pin::new(&mut *self), cx)).await
     }

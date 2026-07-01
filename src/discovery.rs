@@ -1,3 +1,16 @@
+//! Generation-scoped discovery of Home Assistant areas and entities.
+//!
+//! [`EntityCatalog`](crate::discovery::EntityCatalog) loads the area registry
+//! and the entity-registry display
+//! catalog once per connection generation; clones and repeated requests in that
+//! generation reuse the snapshot. The display catalog excludes disabled
+//! registry entries but retains hidden entries. Cached state contributes
+//! `friendly_name` and `device_class` metadata at snapshot creation.
+//!
+//! Area and entity-name lookup is trimmed, case-insensitive exact matching.
+//! Domain and device-class filters are case-sensitive exact identifier matches.
+//! Singular lookups report distinct zero-match and ambiguous-match errors.
+
 use std::{collections::HashSet, fmt, sync::Arc};
 
 use serde::Deserialize;
@@ -8,10 +21,12 @@ use crate::{
     entity::{BinarySensor, EntityId, Sensor, Switch},
 };
 
+/// A Home Assistant area registry identifier.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AreaId(String);
 
 impl AreaId {
+    /// Returns the identifier exactly as supplied by Home Assistant.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -29,6 +44,7 @@ impl AsRef<str> for AreaId {
     }
 }
 
+/// The stable ID and display name of a discovered Home Assistant area.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AreaInfo {
     id: AreaId,
@@ -36,15 +52,22 @@ pub struct AreaInfo {
 }
 
 impl AreaInfo {
+    /// Returns this area's registry identifier.
     pub fn id(&self) -> &AreaId {
         &self.id
     }
 
+    /// Returns this area's Home Assistant display name.
     pub fn name(&self) -> &str {
         &self.name
     }
 }
 
+/// Entity identity and query metadata captured in a discovery snapshot.
+///
+/// The name prefers the generation cache's `friendly_name` and otherwise uses
+/// the registry display name. Device class is present only when it existed in
+/// cached state when the catalog was created.
 #[derive(Clone, Debug)]
 pub struct DiscoveredEntity {
     entity_id: EntityId,
@@ -53,31 +76,51 @@ pub struct DiscoveredEntity {
 }
 
 impl DiscoveredEntity {
+    /// Returns the entity's validated Home Assistant entity ID.
     pub fn entity_id(&self) -> &EntityId {
         &self.entity_id
     }
 
+    /// Returns the snapshot display name, if Home Assistant supplied one.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
 
+    /// Returns the cached `device_class` metadata, if available.
     pub fn device_class(&self) -> Option<&str> {
         self.device_class.as_deref()
     }
 
+    /// Converts this result to a typed binary-sensor handle.
+    ///
+    /// Returns [`Error::InvalidDomain`] if the discovered entity is not in the
+    /// `binary_sensor` domain. Conversion does not contact Home Assistant.
     pub fn binary_sensor(&self) -> Result<BinarySensor> {
         BinarySensor::new(self.entity_id.as_str())
     }
 
+    /// Converts this result to a typed sensor handle with decoding policy `T`.
+    ///
+    /// Returns [`Error::InvalidDomain`] if the discovered entity is not in the
+    /// `sensor` domain. `T` is applied only when state is later decoded.
     pub fn sensor<T>(&self) -> Result<Sensor<T>> {
         Sensor::new(self.entity_id.as_str())
     }
 
+    /// Converts this result to a typed switch handle.
+    ///
+    /// Returns [`Error::InvalidDomain`] if the discovered entity is not in the
+    /// `switch` domain. Conversion does not contact Home Assistant.
     pub fn switch(&self) -> Result<Switch> {
         Switch::new(self.entity_id.as_str())
     }
 }
 
+/// An immutable entity and area catalog cached for one connection generation.
+///
+/// Catalog contents and state-derived metadata do not refresh within a
+/// generation. Obtain a new catalog from the restarted [`Context`](crate::Context)
+/// after reconnect.
 #[derive(Clone, Debug)]
 pub struct EntityCatalog {
     client: HomeAssistantClient,
@@ -90,6 +133,11 @@ impl EntityCatalog {
         Ok(Self { client, snapshot })
     }
 
+    /// Finds exactly one area by trimmed, case-insensitive exact display name.
+    ///
+    /// Returns [`Error::AreaNotFound`] for no match and
+    /// [`Error::AreaAmbiguous`] with every matching area ID for multiple
+    /// matches.
     pub fn area_named(&self, name: impl AsRef<str>) -> Result<AreaInfo> {
         let requested = name.as_ref();
         let normalized = normalize_name(requested);
@@ -112,12 +160,21 @@ impl EntityCatalog {
         }
     }
 
+    /// Returns all enabled entities in this catalog snapshot.
+    ///
+    /// Hidden entities remain included. Use [`EntitySet::query`] to filter the
+    /// returned set.
     pub fn entities(&self) -> EntitySet {
         EntitySet {
             entities: self.snapshot.entities.clone(),
         }
     }
 
+    /// Returns catalog entities targeted by the given area.
+    ///
+    /// Area membership is fetched with Home Assistant's
+    /// `extract_from_target` command and cached per area for this generation.
+    /// Cancellation or a command/protocol failure is returned as [`Error`].
     pub async fn entities_in(&self, area: &AreaInfo) -> Result<EntitySet> {
         let membership = self.client.discovery_entities_in(&area.id).await?;
         Ok(EntitySet {
@@ -140,12 +197,14 @@ fn string_attribute(state: &crate::state::EntityState, key: &str) -> Option<Stri
         .map(str::to_string)
 }
 
+/// A cloneable snapshot subset from which an [`EntityQuery`] can be built.
 #[derive(Clone, Debug)]
 pub struct EntitySet {
     entities: Vec<DiscoveredEntity>,
 }
 
 impl EntitySet {
+    /// Starts a query containing every entity in this set.
     pub fn query(&self) -> EntityQuery {
         EntityQuery {
             entities: self.entities.clone(),
@@ -156,6 +215,10 @@ impl EntitySet {
     }
 }
 
+/// A consuming builder for exact discovery filters.
+///
+/// Filters combine with logical AND. Repeating a filter replaces its previous
+/// value rather than adding another constraint.
 #[derive(Clone, Debug)]
 pub struct EntityQuery {
     entities: Vec<DiscoveredEntity>,
@@ -165,16 +228,24 @@ pub struct EntityQuery {
 }
 
 impl EntityQuery {
+    /// Restricts matches to an exact, case-sensitive entity-ID domain.
     pub fn domain(mut self, domain: impl Into<String>) -> Self {
         self.domain = Some(domain.into());
         self
     }
 
+    /// Restricts matches to one exact, case-sensitive device class.
+    ///
+    /// Entities without cached `device_class` metadata do not match.
     pub fn device_class(mut self, device_class: impl Into<String>) -> Self {
         self.device_classes = Some(vec![device_class.into()]);
         self
     }
 
+    /// Restricts matches to any listed exact, case-sensitive device class.
+    ///
+    /// An empty input matches no entity; entities without device-class metadata
+    /// do not match.
     pub fn device_class_in<I, S>(mut self, device_classes: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -184,15 +255,26 @@ impl EntityQuery {
         self
     }
 
+    /// Restricts matches to a trimmed, case-insensitive exact display name.
+    ///
+    /// Entities without a catalog display name do not match.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
+    /// Returns every matching entity in catalog order.
+    ///
+    /// An empty vector is a successful query result.
     pub fn collect(self) -> Vec<DiscoveredEntity> {
         self.matching_entities()
     }
 
+    /// Requires exactly one matching entity.
+    ///
+    /// Returns [`Error::EntityQueryNotFound`] for zero matches. Multiple
+    /// matches return [`Error::EntityQueryAmbiguous`] with all candidate IDs;
+    /// its query description also includes candidate names and device classes.
     pub fn exactly_one(self) -> Result<DiscoveredEntity> {
         let description = self.description();
         let matches = self.matching_entities();
