@@ -166,5 +166,4 @@ Run with:
 cargo run --example bathroom_exhaust_fan
 ```
 
-`HAUTO_EXHAUST_FAN` may be any entity domain with `turn_on` and `turn_off`
-services, such as `switch.*` or `fan.*`.
+`HAUTO_EXHAUST_FAN` must identify a `switch.*` entity.

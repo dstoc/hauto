@@ -2,12 +2,11 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hauto::{BinarySensor, BinaryState, Context, EntityId, Error as HautoError, Sensor};
-use serde_json::json;
+use hauto::{BinarySensor, BinaryState, Context, Error as HautoError, Sensor, Switch};
 
 #[derive(Clone, Debug)]
 pub struct FanControlConfig {
-    pub fan_entity: EntityId,
+    pub fan: Switch,
     pub bathrooms: [FanBathroomConfig; 2],
     pub settings: FanSettings,
 }
@@ -147,7 +146,7 @@ impl FanControl {
                 return Ok(());
             }
 
-            turn_entity(ctx, &self.config.fan_entity, true).await?;
+            self.config.fan.turn_on(ctx).await?;
             self.fan_on = true;
             self.last_on = Some(now);
         } else if !desired_on && self.fan_on {
@@ -159,7 +158,7 @@ impl FanControl {
                 return Ok(());
             }
 
-            turn_entity(ctx, &self.config.fan_entity, false).await?;
+            self.config.fan.turn_off(ctx).await?;
             self.fan_on = false;
             self.last_off = Some(now);
         }
@@ -247,20 +246,6 @@ async fn is_occupied(ctx: &Context, bathroom: &FanBathroomConfig) -> hauto::Resu
         Err(HautoError::EntityNotFound(_)) => Ok(false),
         Err(error) => Err(error),
     }
-}
-
-async fn turn_entity(ctx: &Context, entity_id: &EntityId, on: bool) -> hauto::Result<()> {
-    let service = if on { "turn_on" } else { "turn_off" };
-    ctx.home_assistant()
-        .call_service_raw(
-            entity_id.domain(),
-            service,
-            json!({
-                "entity_id": entity_id.as_str(),
-            }),
-        )
-        .await?;
-    Ok(())
 }
 
 fn ignore_string_change(result: hauto::Result<String>) -> hauto::Result<()> {

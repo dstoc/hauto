@@ -7,7 +7,7 @@
 use std::{env, error::Error};
 
 use fan_control::{FanBathroomConfig, FanControl, FanControlConfig, FanSettings, QuietHours};
-use hauto::{App, BinarySensor, EntityId, Sensor, SensorValue};
+use hauto::{App, BinarySensor, EntityId, Sensor, SensorValue, Switch};
 use humidity_status::{HumiditySettings, HumidityStatus, HumidityStatusConfig};
 
 mod fan_control;
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         settings: HumiditySettings::default(),
     };
     let fan_control = FanControlConfig {
-        fan_entity: EntityId::new(required_env("HAUTO_EXHAUST_FAN")?)?,
+        fan: Switch::new(required_env("HAUTO_EXHAUST_FAN")?)?,
         bathrooms: [
             FanBathroomConfig {
                 name: "Bathroom 1".to_string(),
