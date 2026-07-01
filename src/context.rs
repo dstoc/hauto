@@ -11,6 +11,9 @@ use crate::{
     wait_cancelled,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// Access to Home Assistant and cancellation-aware work for one connection generation.
 ///
 /// Cloning a context does not create a new generation. All clones share the

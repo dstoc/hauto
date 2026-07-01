@@ -12,6 +12,9 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{Error, Result, runtime::BoxFuture};
 
+#[cfg(test)]
+mod tests;
+
 /// A future for the result of work started by [`Context::spawn`](crate::Context::spawn).
 ///
 /// Awaiting the handle returns the task's result. A task panic or runtime abort

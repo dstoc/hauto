@@ -67,6 +67,9 @@ use crate::{
     state::{EntityState, StateCache, StateChangedEvent},
 };
 
+#[cfg(test)]
+mod tests;
+
 type StateDecoder<T> = fn(&EntityId, &EntityState) -> Result<T>;
 type StateCondition<T> = Arc<dyn Fn(&T) -> bool + Send + Sync + 'static>;
 

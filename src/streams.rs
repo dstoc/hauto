@@ -13,6 +13,9 @@ use serde_json::Value;
 
 use crate::{entity::EntityId, state::StateChangedEvent};
 
+#[cfg(test)]
+mod tests;
+
 /// A terminal failure reported as the last item of an event stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventStreamError {
