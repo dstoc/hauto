@@ -243,6 +243,8 @@ impl HomeAssistantClient {
     ///
     /// This sends `POST /api/states/{entity_id}`. It does not create or update
     /// an entity-registry entry and does not call an integration or device.
+    /// The resulting state-machine entry is not persistent across a Home
+    /// Assistant restart.
     /// [`StateWrite::validate`] is applied before the request. HTTP 201 returns
     /// [`SetStateResult::Created`], HTTP 200 returns
     /// [`SetStateResult::Updated`], and other statuses are

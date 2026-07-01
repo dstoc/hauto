@@ -260,6 +260,10 @@ impl Context {
     /// change. Predicate errors are propagated. The returned builder can
     /// require continuous satisfaction or impose a timeout.
     ///
+    /// Because every state change can invoke the predicate, it should remain
+    /// synchronous and inexpensive. Prefer an entity-specific wait when the
+    /// condition depends on only one entity.
+    ///
     /// Awaiting the wait returns [`Error::Cancelled`] if this generation is
     /// cancelled; a held interval is not resumed in a later generation.
     pub fn wait_until_state<F>(&self, predicate: F) -> GlobalStateWait<'_, F>
