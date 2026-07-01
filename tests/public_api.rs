@@ -88,6 +88,10 @@ fn advanced_module_api_is_importable() {
         _: Option<StateWait<'a>>,
         _: Option<TimedGlobalStateWait<'a, F>>,
         _: Option<TimedStateWait<'a>>,
+    ) {
+    }
+
+    fn wait_result_paths(
         _: Option<ModuleHoldResult<()>>,
         _: Option<ModuleTimeoutResult<()>>,
         _: Option<ModuleWaitResult>,
@@ -126,6 +130,7 @@ fn advanced_module_api_is_importable() {
     let _ = entity_paths;
     let _ = discovery_paths;
     let _ = wait_paths::<fn(&StateCache<'_>) -> Result<bool>>;
+    let _ = wait_result_paths;
     let _ = state_paths;
     let _ = runtime_paths::<RootAutomation>;
     let _ = service_paths;
