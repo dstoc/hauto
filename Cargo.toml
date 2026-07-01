@@ -1,6 +1,6 @@
 [package]
 name = "hauto"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Async Rust automation framework for Home Assistant"
 license = "MIT"
