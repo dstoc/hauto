@@ -625,3 +625,6 @@ fn invalid_entity_id(value: &str, reason: impl Into<String>) -> Error {
         reason: reason.into(),
     }
 }
+
+#[cfg(test)]
+mod tests;

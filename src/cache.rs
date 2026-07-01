@@ -22,3 +22,6 @@ impl<'a> StateCache<'a> {
         self.generation.cached_state(entity_id)
     }
 }
+
+#[cfg(test)]
+mod tests;

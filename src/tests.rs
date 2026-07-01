@@ -5,7 +5,7 @@ use crate::{
     discovery::AreaInfo,
     rest::ReqwestRestStateTransport,
     runtime::BoxFuture,
-    state::{DeleteStateResult, EntityState, SetStateResult, StateCache, StateWrite},
+    state::{DeleteStateResult, EntityState, SetStateResult, StateWrite},
     test_support::*,
 };
 use futures_util::SinkExt;
@@ -18,103 +18,6 @@ use std::{
     time::Duration,
 };
 use tokio::sync::watch;
-
-#[test]
-fn entity_id_accepts_basic_home_assistant_shape() {
-    let id = EntityId::new("binary_sensor.office_occupancy").unwrap();
-    assert_eq!(id.domain(), "binary_sensor");
-    assert_eq!(id.object_id(), "office_occupancy");
-}
-
-#[test]
-fn entity_id_rejects_invalid_syntax() {
-    for value in [
-        "",
-        "light",
-        ".office",
-        "light.",
-        "Light.office",
-        "light.office-1",
-        "light.office.extra",
-    ] {
-        assert!(EntityId::new(value).is_err(), "{value} should be invalid");
-    }
-}
-
-#[test]
-fn typed_handles_validate_domain() {
-    assert!(Light::new("light.office").is_ok());
-    assert!(BinarySensor::new("binary_sensor.office_occupancy").is_ok());
-    assert!(Switch::new("switch.fan").is_ok());
-    assert!(Sensor::<f64>::new("sensor.temperature").is_ok());
-    assert!(Light::new("switch.office").is_err());
-}
-
-#[test]
-fn state_write_requires_object_attributes() {
-    assert!(StateWrite::new("ok", json!({ "friendly_name": "Status" })).is_ok());
-    assert!(StateWrite::new("bad", json!(["not", "object"])).is_err());
-}
-
-#[test]
-fn light_turn_on_validates_brightness_pct() {
-    assert!(
-        LightTurnOn {
-            brightness_pct: Some(100),
-            ..Default::default()
-        }
-        .validate()
-        .is_ok()
-    );
-
-    assert!(
-        LightTurnOn {
-            brightness_pct: Some(101),
-            ..Default::default()
-        }
-        .validate()
-        .is_err()
-    );
-}
-
-#[test]
-fn light_service_payloads_include_entity_transition_rgb_and_brightness() {
-    let entity_id = EntityId::new("light.office").unwrap();
-    let payload = LightTurnOn {
-        brightness_pct: Some(75),
-        brightness: Some(128),
-        transition: Some(Duration::from_millis(1500)),
-        color_temp_kelvin: Some(2700),
-        rgb_color: Some((1, 2, 3)),
-        effect: Some("pulse".to_string()),
-    }
-    .into_service_data(&entity_id);
-
-    assert_eq!(
-        payload,
-        json!({
-            "entity_id": "light.office",
-            "brightness_pct": 75,
-            "brightness": 128,
-            "transition": 1.5,
-            "color_temp_kelvin": 2700,
-            "rgb_color": [1, 2, 3],
-            "effect": "pulse",
-        })
-    );
-
-    let payload = LightTurnOff {
-        transition: Some(Duration::from_secs(2)),
-    }
-    .into_service_data(&entity_id);
-    assert_eq!(
-        payload,
-        json!({
-            "entity_id": "light.office",
-            "transition": 2.0,
-        })
-    );
-}
 
 #[test]
 fn call_service_raw_validates_domain_and_service_before_placeholder() {
@@ -1148,52 +1051,6 @@ fn fresh_websocket_generation_loads_a_fresh_catalog() {
 }
 
 #[test]
-fn state_cache_get_state_raw_hits_and_misses() {
-    run_async(async {
-        let state = sample_state("light.office", "on");
-        let ctx = Context::with_seeded_states([state.clone()]);
-        let ha = ctx.home_assistant();
-
-        assert_eq!(ha.get_state_raw(&state.entity_id).await.unwrap(), state);
-
-        let missing = EntityId::new("light.missing").unwrap();
-        assert!(matches!(
-            ha.get_state_raw(&missing).await,
-            Err(Error::EntityNotFound(entity_id)) if entity_id == missing
-        ));
-    });
-}
-
-#[test]
-fn entity_handle_state_reads_from_cache() {
-    run_async(async {
-        let light = Light::new("light.office").unwrap();
-        let state = sample_state("light.office", "off");
-        let ctx = Context::with_seeded_states([state.clone()]);
-
-        assert_eq!(light.state(&ctx).await.unwrap(), state);
-    });
-}
-
-#[test]
-fn cache_state_and_remove_cached_state_update_generation_cache() {
-    run_async(async {
-        let ctx = Context::new_generation();
-        let ha = ctx.home_assistant();
-        let state = sample_state("sensor.temperature", "21.5");
-        let entity_id = state.entity_id.clone();
-
-        ha.cache_state(state.clone()).unwrap();
-        assert_eq!(ha.get_state_raw(&entity_id).await.unwrap(), state);
-        assert!(ha.remove_cached_state(&entity_id).unwrap().is_some());
-        assert!(matches!(
-            ha.get_state_raw(&entity_id).await,
-            Err(Error::EntityNotFound(missing)) if missing == entity_id
-        ));
-    });
-}
-
-#[test]
 fn cancellation_notifies_context_and_stales_client_handles() {
     run_async(async {
         let state = sample_state("switch.fan", "on");
@@ -1778,116 +1635,6 @@ fn numeric_sensor_non_numeric_state_returns_invalid_state() {
 }
 
 #[test]
-fn numeric_sensor_read_decodes_hit_miss_and_invalid_state_from_cache() {
-    run_async(async {
-        let sensor = Sensor::<f64>::new("sensor.temperature").unwrap();
-        let missing = Sensor::<f64>::new("sensor.missing").unwrap();
-        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "21.5")]);
-        let cache = StateCache::new(&ctx.home_assistant.generation);
-
-        assert_eq!(sensor.read(&cache).unwrap(), Some(21.5));
-        assert_eq!(missing.read(&cache).unwrap(), None);
-
-        ctx.home_assistant()
-            .cache_state(sample_state("sensor.temperature", "unknown"))
-            .unwrap();
-        let cache = StateCache::new(&ctx.home_assistant.generation);
-        assert!(matches!(
-            sensor.read(&cache),
-            Err(Error::InvalidState { entity_id, .. }) if entity_id == *sensor.entity_id()
-        ));
-    });
-}
-
-#[test]
-fn typed_entity_get_fetches_current_state_and_decodes_it() {
-    run_async(async {
-        let light = Light::new("light.office").unwrap();
-        let temperature = Sensor::<f64>::new("sensor.temperature").unwrap();
-        let unavailable_temperature =
-            Sensor::<SensorValue<f64>>::new("sensor.unavailable_temperature").unwrap();
-        let missing = Sensor::<SensorValue<f64>>::new("sensor.missing").unwrap();
-        let ctx = Context::with_seeded_states([
-            sample_state("light.office", "on"),
-            sample_state("sensor.temperature", "21.5"),
-            sample_state("sensor.unavailable_temperature", "unavailable"),
-        ]);
-
-        assert_eq!(light.get(&ctx).await.unwrap(), BinaryState::On);
-        assert_eq!(temperature.get(&ctx).await.unwrap(), 21.5);
-        assert_eq!(
-            unavailable_temperature.get(&ctx).await.unwrap(),
-            SensorValue::Unavailable
-        );
-        assert!(matches!(
-            missing.get(&ctx).await,
-            Err(Error::EntityNotFound(entity_id)) if entity_id == *missing.entity_id()
-        ));
-    });
-}
-
-#[test]
-fn typed_entity_next_change_waits_for_change_and_decodes_new_state() {
-    run_async(async {
-        let light = Light::new("light.office").unwrap();
-        let temperature = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
-        let ctx = Context::with_seeded_states([
-            sample_state("light.office", "off"),
-            sample_state("sensor.temperature", "20.0"),
-        ]);
-
-        let light_ctx = ctx.clone();
-        let light_waiter = light.clone();
-        let light_change = ctx.spawn(async move { light_waiter.next_change(&light_ctx).await });
-        tokio::task::yield_now().await;
-        ctx.home_assistant()
-            .cache_state(sample_state("light.office", "on"))
-            .unwrap();
-        assert_eq!(light_change.await.unwrap(), BinaryState::On);
-
-        let temperature_ctx = ctx.clone();
-        let temperature_waiter = temperature.clone();
-        let temperature_change =
-            ctx.spawn(async move { temperature_waiter.next_change(&temperature_ctx).await });
-        tokio::task::yield_now().await;
-        ctx.home_assistant()
-            .cache_state(sample_state("sensor.temperature", "unavailable"))
-            .unwrap();
-        assert_eq!(temperature_change.await.unwrap(), SensorValue::Unavailable);
-    });
-}
-
-#[test]
-fn typed_entity_next_change_reports_deleted_entity_and_cancellation() {
-    run_async(async {
-        let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
-        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "20.0")]);
-        let waiter_ctx = ctx.clone();
-        let waiter_sensor = sensor.clone();
-        let waiter = ctx.spawn(async move { waiter_sensor.next_change(&waiter_ctx).await });
-
-        tokio::task::yield_now().await;
-        ctx.home_assistant()
-            .remove_cached_state(sensor.entity_id())
-            .unwrap();
-        assert!(matches!(
-            waiter.await,
-            Err(Error::EntityNotFound(entity_id)) if entity_id == *sensor.entity_id()
-        ));
-
-        let cancelled_ctx =
-            Context::with_seeded_states([sample_state("sensor.temperature", "20.0")]);
-        let cancelled_waiter_ctx = cancelled_ctx.clone();
-        let cancelled_sensor = sensor.clone();
-        let cancelled_waiter = cancelled_ctx
-            .spawn(async move { cancelled_sensor.next_change(&cancelled_waiter_ctx).await });
-        tokio::task::yield_now().await;
-        cancelled_ctx.cancel_generation();
-        assert!(matches!(cancelled_waiter.await, Err(Error::Cancelled)));
-    });
-}
-
-#[test]
 fn sensor_value_numeric_sensor_wait_until_matching_completes_after_sentinel_state_change() {
     run_async(async {
         let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
@@ -1906,40 +1653,6 @@ fn sensor_value_numeric_sensor_wait_until_matching_completes_after_sentinel_stat
             .unwrap();
 
         waiter.await.unwrap();
-    });
-}
-
-#[test]
-fn sensor_value_numeric_sensor_read_decodes_values_sentinels_miss_and_invalid_state() {
-    run_async(async {
-        let sensor = Sensor::<SensorValue<f64>>::new("sensor.temperature").unwrap();
-        let missing = Sensor::<SensorValue<f64>>::new("sensor.missing").unwrap();
-        let ctx = Context::with_seeded_states([sample_state("sensor.temperature", "21.5")]);
-        let cache = StateCache::new(&ctx.home_assistant.generation);
-
-        assert_eq!(sensor.read(&cache).unwrap(), Some(SensorValue::Value(21.5)));
-        assert_eq!(missing.read(&cache).unwrap(), None);
-
-        for (raw, expected) in [
-            ("unknown", SensorValue::Unknown),
-            ("unavailable", SensorValue::Unavailable),
-            ("", SensorValue::Unknown),
-        ] {
-            ctx.home_assistant()
-                .cache_state(sample_state("sensor.temperature", raw))
-                .unwrap();
-            let cache = StateCache::new(&ctx.home_assistant.generation);
-            assert_eq!(sensor.read(&cache).unwrap(), Some(expected));
-        }
-
-        ctx.home_assistant()
-            .cache_state(sample_state("sensor.temperature", "not-a-number"))
-            .unwrap();
-        let cache = StateCache::new(&ctx.home_assistant.generation);
-        assert!(matches!(
-            sensor.read(&cache),
-            Err(Error::InvalidState { entity_id, .. }) if entity_id == *sensor.entity_id()
-        ));
     });
 }
 

@@ -116,3 +116,6 @@ pub(crate) fn validate_domain_service(domain: &str, service: &str) -> Result<()>
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -175,3 +175,6 @@ pub struct StateChangedEvent {
     /// The state after the event, or `None` when the entry was deleted.
     pub new_state: Option<EntityState>,
 }
+
+#[cfg(test)]
+mod tests;
